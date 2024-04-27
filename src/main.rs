@@ -13,7 +13,7 @@ mod query;
 
 use query::Queries;
 
-const QUADS_LEN: usize = 1_000_000;
+const QUADS_LEN: usize = 3_700_000;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -239,9 +239,9 @@ async fn run_triangles(event_loop: EventLoop<()>, window: Window, quads: &[Quad]
         .unwrap();
 }
 
-const BLOCK_SIZE: u32 = 32;
-const WIDTH: u32 = 2_048;
-const HEIGHT: u32 = 1_024;
+const BLOCK_SIZE: u32 = 16;
+const WIDTH: u32 = 4_048;
+const HEIGHT: u32 = 2_048;
 
 fn split_into_blocks(quads: &[Quad]) -> (Vec<u32>, Vec<u32>) {
     let mut blocks = BTreeMap::new();
@@ -339,6 +339,20 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, quads: &[Quad]) 
         contents: bytemuck::cast_slice(&quads),
         usage: wgpu::BufferUsages::STORAGE,
     });
+    let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("depth_texture"),
+        size: wgpu::Extent3d {
+            width: WIDTH,
+            height: HEIGHT,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rg32Uint,
+        usage: wgpu::TextureUsages::STORAGE_BINDING,
+        view_formats: &[],
+    });
 
     let mut encoder =
         device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -358,6 +372,12 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, quads: &[Quad]) 
             wgpu::BindGroupEntry {
                 binding: 2,
                 resource: quad_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(
+                    &depth_texture.create_view(&wgpu::TextureViewDescriptor::default()),
+                ),
             },
         ],
     });
@@ -385,6 +405,107 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, quads: &[Quad]) 
     dbg!(queries.wait_for_results(&device, &queue));
 }
 
+async fn run_compute_atomic(event_loop: EventLoop<()>, window: Window, quads: &[Quad]) {
+    let mut size = window.inner_size();
+    size.width = size.width.max(1);
+    size.height = size.height.max(1);
+
+    let instance = wgpu::Instance::default();
+
+    let surface = instance.create_surface(&window).unwrap();
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: Some(&surface),
+        })
+        .await
+        .unwrap();
+
+    let (device, queue) = adapter
+        .request_device(
+            &wgpu::DeviceDescriptor {
+                label: None,
+                required_features: wgpu::Features::TIMESTAMP_QUERY
+                    | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
+                required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+    let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("shader_module"),
+        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("compute_atomic.wgsl"))),
+    });
+
+    let rasterize_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: None,
+        layout: None,
+        module: &shader_module,
+        entry_point: "rasterize",
+        compilation_options: wgpu::PipelineCompilationOptions {
+            constants: &[].into(),
+            zero_initialize_workgroup_memory: false,
+        },
+    });
+
+    let rasterize_bind_group_layout = rasterize_pipeline.get_bind_group_layout(0);
+
+    let quad_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("quad_buffer"),
+        contents: bytemuck::cast_slice(&quads),
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+    let depth_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: (WIDTH * HEIGHT * mem::size_of::<u32>() as u32) as _,
+        usage: wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+
+    let rasterize_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &rasterize_bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: quad_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: depth_buffer.as_entire_binding(),
+            },
+        ],
+    });
+
+    let mut queries = Queries::new(&device, 2);
+
+    queries.write_next_timestamp(&mut encoder);
+
+    {
+        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: None,
+            timestamp_writes: None,
+        });
+
+        cpass.set_pipeline(&rasterize_pipeline);
+        cpass.set_bind_group(0, &rasterize_bind_group, &[]);
+        cpass.dispatch_workgroups(QUADS_LEN.div_ceil(256) as u32, 1, 1);
+    }
+
+    queries.write_next_timestamp(&mut encoder);
+    queries.resolve(&mut encoder);
+
+    queue.submit(Some(encoder.finish()));
+
+    dbg!(queries.wait_for_results(&device, &queue));
+}
+
 fn main() {
     let event_loop = EventLoop::new().unwrap();
     let window = WindowBuilder::new().build(&event_loop).unwrap();
@@ -393,7 +514,7 @@ fn main() {
     let quads: Vec<_> = (0..QUADS_LEN)
         .into_iter()
         .map(|_| {
-            const MAX_SIZE: u32 = 4;
+            const MAX_SIZE: u32 = 32;
 
             let x0 = rng.gen_range(0..=WIDTH);
             let y0 = rng.gen_range(0..=HEIGHT);
@@ -426,5 +547,6 @@ fn main() {
     // ];
 
     // pollster::block_on(run_triangles(event_loop, window, &quads));
-    pollster::block_on(run_compute(event_loop, window, &quads));
+    // pollster::block_on(run_compute(event_loop, window, &quads));
+    pollster::block_on(run_compute_atomic(event_loop, window, &quads));
 }
