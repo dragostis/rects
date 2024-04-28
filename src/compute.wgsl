@@ -50,6 +50,18 @@ fn rasterize(
     let end_index = indices[workgroup_index + 1];
     let len = end_index - start_index;
 
+    for (var j = 0u; j < BLOCK_SIZE_SQUARE / WORKGOUP_SIZE; j++) {
+        let i = j * WORKGOUP_SIZE + local_index;
+        
+        let x = block_x0 + i % BLOCK_SIZE;
+        let y = block_y0 + i / BLOCK_SIZE;
+
+        atomicStore(&cells[y * BLOCK_SIZE + x].depth, 0u);
+        cells[y * BLOCK_SIZE + x].index = 0xFFFFFFFFu;
+    }
+
+    workgroupBarrier();
+
     for (var j = 0u; j < (len + WORKGOUP_SIZE - 1) / WORKGOUP_SIZE; j++) {
         let i = start_index + j * WORKGOUP_SIZE + local_index;
 

@@ -1,4 +1,4 @@
-use std::{borrow::Cow, collections::BTreeMap, iter, mem};
+use std::{borrow::Cow, collections::BTreeMap, fs::File, io::Write, iter, mem};
 
 use bytemuck::{Pod, Zeroable};
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -240,7 +240,7 @@ async fn run_triangles(event_loop: EventLoop<()>, window: Window, quads: &[Quad]
 }
 
 const BLOCK_SIZE: u32 = 16;
-const WIDTH: u32 = 4_048;
+const WIDTH: u32 = 4_096;
 const HEIGHT: u32 = 2_048;
 
 fn split_into_blocks(quads: &[Quad]) -> (Vec<u32>, Vec<u32>) {
@@ -350,8 +350,14 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, quads: &[Quad]) 
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rg32Uint,
-        usage: wgpu::TextureUsages::STORAGE_BINDING,
+        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
+    });
+    let depth_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("depth_buffer"),
+        size: WIDTH as u64 * HEIGHT as u64 * mem::size_of::<[u32; 2]>() as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
     });
 
     let mut encoder =
@@ -400,110 +406,68 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, quads: &[Quad]) 
     queries.write_next_timestamp(&mut encoder);
     queries.resolve(&mut encoder);
 
+    encoder.copy_texture_to_buffer(
+        wgpu::ImageCopyTextureBase {
+            texture: &depth_texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::default(),
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::ImageCopyBufferBase {
+            buffer: &depth_buffer,
+            layout: wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(WIDTH as u32 * mem::size_of::<[u32; 2]>() as u32),
+                rows_per_image: None,
+            },
+        },
+        wgpu::Extent3d {
+            width: WIDTH,
+            height: HEIGHT,
+            depth_or_array_layers: 1,
+        },
+    );
+
     queue.submit(Some(encoder.finish()));
 
+    let values = depth_buffer.slice(..);
+    values.map_async(wgpu::MapMode::Read, |_| ());
+
     dbg!(queries.wait_for_results(&device, &queue));
-}
 
-async fn run_compute_atomic(event_loop: EventLoop<()>, window: Window, quads: &[Quad]) {
-    let mut size = window.inner_size();
-    size.width = size.width.max(1);
-    size.height = size.height.max(1);
+    let slice = values.get_mapped_range();
+    let values: &[[u32; 2]] = bytemuck::cast_slice(&slice);
 
-    let instance = wgpu::Instance::default();
+    fn color_from_index(index: u32) -> [u8; 3] {
+        if index == u32::MAX {
+            return [0; 3];
+        }
 
-    let surface = instance.create_surface(&window).unwrap();
-    let adapter = instance
-        .request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            force_fallback_adapter: false,
-            compatible_surface: Some(&surface),
-        })
-        .await
-        .unwrap();
+        let seed = index * 3;
 
-    let (device, queue) = adapter
-        .request_device(
-            &wgpu::DeviceDescriptor {
-                label: None,
-                required_features: wgpu::Features::TIMESTAMP_QUERY
-                    | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
-                required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
-            },
-            None,
-        )
-        .await
-        .unwrap();
+        let r = (seed * 279470273) % 255;
+        let g = ((seed + 1) * 279470273) % 255;
+        let b = ((seed + 2) * 279470273) % 255;
 
-    let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("shader_module"),
-        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("compute_atomic.wgsl"))),
-    });
-
-    let rasterize_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: None,
-        layout: None,
-        module: &shader_module,
-        entry_point: "rasterize",
-        compilation_options: wgpu::PipelineCompilationOptions {
-            constants: &[].into(),
-            zero_initialize_workgroup_memory: false,
-        },
-    });
-
-    let rasterize_bind_group_layout = rasterize_pipeline.get_bind_group_layout(0);
-
-    let quad_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("quad_buffer"),
-        contents: bytemuck::cast_slice(&quads),
-        usage: wgpu::BufferUsages::STORAGE,
-    });
-    let depth_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None,
-        size: (WIDTH * HEIGHT * mem::size_of::<u32>() as u32) as _,
-        usage: wgpu::BufferUsages::STORAGE,
-        mapped_at_creation: false,
-    });
-
-    let mut encoder =
-        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-
-    let rasterize_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: None,
-        layout: &rasterize_bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: quad_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: depth_buffer.as_entire_binding(),
-            },
-        ],
-    });
-
-    let mut queries = Queries::new(&device, 2);
-
-    queries.write_next_timestamp(&mut encoder);
-
-    {
-        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: None,
-            timestamp_writes: None,
-        });
-
-        cpass.set_pipeline(&rasterize_pipeline);
-        cpass.set_bind_group(0, &rasterize_bind_group, &[]);
-        cpass.dispatch_workgroups(QUADS_LEN.div_ceil(256) as u32, 1, 1);
+        [r, g, b].map(|c| c as u8)
     }
 
-    queries.write_next_timestamp(&mut encoder);
-    queries.resolve(&mut encoder);
+    let bytes: Vec<_> = values
+        .iter()
+        .map(|[_, i]| color_from_index(*i))
+        .flatten()
+        .collect();
 
-    queue.submit(Some(encoder.finish()));
-
-    dbg!(queries.wait_for_results(&device, &queue));
+    let new_path = "capture.ppm";
+    let mut output = File::options()
+        .write(true)
+        .create(true)
+        .open(new_path)
+        .unwrap();
+    output
+        .write_all(format!("P6\n{} {}\n255\n", WIDTH, HEIGHT,).as_bytes())
+        .unwrap();
+    output.write_all(&bytes).unwrap();
 }
 
 fn main() {
@@ -514,7 +478,7 @@ fn main() {
     let quads: Vec<_> = (0..QUADS_LEN)
         .into_iter()
         .map(|_| {
-            const MAX_SIZE: u32 = 32;
+            const MAX_SIZE: u32 = 4;
 
             let x0 = rng.gen_range(0..=WIDTH);
             let y0 = rng.gen_range(0..=HEIGHT);
@@ -547,6 +511,5 @@ fn main() {
     // ];
 
     // pollster::block_on(run_triangles(event_loop, window, &quads));
-    // pollster::block_on(run_compute(event_loop, window, &quads));
-    pollster::block_on(run_compute_atomic(event_loop, window, &quads));
+    pollster::block_on(run_compute(event_loop, window, &quads));
 }
