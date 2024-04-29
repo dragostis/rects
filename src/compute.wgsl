@@ -14,16 +14,33 @@ const QUAD_ZERO = Quad(0, 0, 0, 0, 0);
 
 @group(0)
 @binding(0)
-var<storage> indices: array<u32>;
-@group(0)
-@binding(1)
-var<storage> blocks: array<u32>;
-@group(0)
-@binding(2)
 var<storage> quads: array<Quad>;
 @group(0)
+@binding(1)
+var<storage, read_write> counts: array<atomic<u32>>;
+@group(0)
+@binding(2)
+var<storage> indices: array<u32>;
+@group(0)
 @binding(3)
+var<storage> blocks: array<u32>;
+@group(0)
+@binding(4)
 var depth_texture: texture_storage_2d<rg32uint, write>;
+
+@compute
+@workgroup_size(WORKGOUP_SIZE)
+fn count(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+) {
+    let q = quads[global_id.x];
+
+    for (var x = q.x0 / BLOCK_SIZE; x < (q.x1 + BLOCK_SIZE - 1) / BLOCK_SIZE; x++) {
+        for (var y = q.y0 / BLOCK_SIZE; y < (q.y1 + BLOCK_SIZE - 1) / BLOCK_SIZE; y++) {
+            atomicAdd(&counts[y * (4096 / BLOCK_SIZE) + x], 1u);
+        }
+    }
+}
 
 struct Cell {
     depth: atomic<u32>,

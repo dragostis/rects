@@ -309,8 +309,18 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, quads: &[Quad]) 
         source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("compute.wgsl"))),
     });
 
+    let count_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("count_pipeline"),
+        layout: None,
+        module: &shader_module,
+        entry_point: "count",
+        compilation_options: wgpu::PipelineCompilationOptions {
+            constants: &[].into(),
+            zero_initialize_workgroup_memory: false,
+        },
+    });
     let rasterize_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: None,
+        label: Some("rasterize_pipeline"),
         layout: None,
         module: &shader_module,
         entry_point: "rasterize",
@@ -320,10 +330,24 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, quads: &[Quad]) 
         },
     });
 
+    let count_bind_group_layout = count_pipeline.get_bind_group_layout(0);
     let rasterize_bind_group_layout = rasterize_pipeline.get_bind_group_layout(0);
 
     let (indices, blocks) = split_into_blocks(quads);
 
+    let quad_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("quad_buffer"),
+        contents: bytemuck::cast_slice(&quads),
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+    let count_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("count_buffer"),
+        size: WIDTH.div_ceil(BLOCK_SIZE) as u64
+            * HEIGHT.div_ceil(BLOCK_SIZE) as u64
+            * mem::size_of::<u32>() as u64,
+        usage: wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
     let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("index_buffer"),
         contents: bytemuck::cast_slice(&indices),
@@ -332,11 +356,6 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, quads: &[Quad]) 
     let block_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("block_buffer"),
         contents: bytemuck::cast_slice(&blocks),
-        usage: wgpu::BufferUsages::STORAGE,
-    });
-    let quad_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("quad_buffer"),
-        contents: bytemuck::cast_slice(&quads),
         usage: wgpu::BufferUsages::STORAGE,
     });
     let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -363,24 +382,38 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, quads: &[Quad]) 
     let mut encoder =
         device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
+    let count_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("count_bind_group"),
+        layout: &count_bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: quad_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: count_buffer.as_entire_binding(),
+            },
+        ],
+    });
     let rasterize_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: None,
+        label: Some("rasterize_bind_group"),
         layout: &rasterize_bind_group_layout,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: index_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: block_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
                 resource: quad_buffer.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
+                binding: 2,
+                resource: index_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
                 binding: 3,
+                resource: block_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
                 resource: wgpu::BindingResource::TextureView(
                     &depth_texture.create_view(&wgpu::TextureViewDescriptor::default()),
                 ),
@@ -388,7 +421,20 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, quads: &[Quad]) 
         ],
     });
 
-    let mut queries = Queries::new(&device, 2);
+    let mut queries = Queries::new(&device, 3);
+
+    queries.write_next_timestamp(&mut encoder);
+
+    {
+        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: None,
+            timestamp_writes: None,
+        });
+
+        cpass.set_pipeline(&count_pipeline);
+        cpass.set_bind_group(0, &count_bind_group, &[]);
+        cpass.dispatch_workgroups(QUADS_LEN.div_ceil(256) as u32, 1, 1);
+    }
 
     queries.write_next_timestamp(&mut encoder);
 
