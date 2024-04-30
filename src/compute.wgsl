@@ -42,6 +42,63 @@ fn count(
     }
 }
 
+var<workgroup> prefix: array<u32, WORKGOUP_SIZE>;
+
+fn workgroupPrefixSum(val: u32, local_index: u32) -> u32 {
+    var sum = 0u;
+    var shift = 1u;
+
+    let shifted = (local_index + shift) & (WORKGOUP_SIZE - 1);
+    prefix[shifted] = select(val, 0u, shifted < shift);
+
+    loop {
+        workgroupBarrier();
+
+        sum += prefix[local_index];
+
+        if shift == WORKGOUP_SIZE { break; }
+
+        workgroupBarrier();
+
+        let shifted = (local_index + shift) & (WORKGOUP_SIZE - 1);
+        prefix[shifted] = select(sum, 0u, shifted < shift);
+
+        shift <<= 1u;
+    }
+
+    return sum;
+}
+
+var<workgroup> carry: u32;
+
+@compute
+@workgroup_size(WORKGOUP_SIZE)
+fn prefixSum(
+    @builtin(local_invocation_index) local_index: u32,
+) {
+    if local_index == 0 {
+        carry = 0u;
+    }
+
+    prefix[local_index] = 0u;
+
+    workgroupBarrier();
+
+    for (var i = 0u; i < (arrayLength(&counts) + WORKGOUP_SIZE - 1) / WORKGOUP_SIZE; i++) {
+        let val = counts[i * WORKGOUP_SIZE + local_index];
+
+        let sum = workgroupPrefixSum(val, local_index);
+
+        counts[i * WORKGOUP_SIZE + local_index] = sum + carry;
+
+        if local_index == WORKGOUP_SIZE - 1 {
+            carry += val + sum;
+        }
+
+        workgroupBarrier();
+    }
+}
+
 struct Cell {
     depth: atomic<u32>,
     index: u32,
