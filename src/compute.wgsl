@@ -12,6 +12,38 @@ struct Quad {
 
 const QUAD_ZERO = Quad(0, 0, 0, 0, 0);
 
+struct NormQuad {
+    coords: u32,
+    depth: u32,
+}
+
+fn newNormQuad(
+    x0: u32,
+    y0: u32,
+    x1: u32,
+    y1: u32,
+    depth: u32,
+) -> NormQuad {
+    var coords = 0u;
+
+    coords = insertBits(coords, x0, 0u, 6u);
+    coords = insertBits(coords, y0, 6u, 6u);
+    coords = insertBits(coords, x1, 12u, 6u);
+    coords = insertBits(coords, y1, 18u, 6u);
+
+    return NormQuad(coords, depth);
+}
+
+fn toNormQuad(q: NormQuad) -> Quad {
+    return Quad(
+        extractBits(q.coords, 0u, 6u),
+        extractBits(q.coords, 6u, 6u),
+        extractBits(q.coords, 12u, 6u),
+        extractBits(q.coords, 18u, 6u),
+        q.depth,
+    );
+}
+
 @group(0)
 @binding(0)
 var<storage> quads: array<Quad>;
@@ -20,10 +52,10 @@ var<storage> quads: array<Quad>;
 var<storage, read_write> counts: array<atomic<u32>>;
 @group(0)
 @binding(2)
-var<storage> indices: array<u32>;
+var<storage, read_write> norm_quads: array<NormQuad>;
 @group(0)
 @binding(3)
-var<storage, read_write> blocks: array<u32>;
+var<storage> indices: array<u32>;
 @group(0)
 @binding(4)
 var depth_texture: texture_storage_2d<rg32uint, write>;
@@ -110,7 +142,12 @@ fn scatter(
         for (var y = q.y0 / BLOCK_SIZE; y < (q.y1 + BLOCK_SIZE - 1) / BLOCK_SIZE; y++) {
             let i = atomicAdd(&counts[y * (4096 / BLOCK_SIZE) + x], 1u);
 
-            blocks[i] = global_id.x;
+            let x0 = u32(max(i32(q.x0) - i32(x * BLOCK_SIZE), 0));
+            let y0 = u32(max(i32(q.y0) - i32(y * BLOCK_SIZE), 0));
+            let x1 = min(q.x1 - x * BLOCK_SIZE, BLOCK_SIZE);
+            let y1 = min(q.y1 - y * BLOCK_SIZE, BLOCK_SIZE);
+
+            norm_quads[i] = newNormQuad(x0, y0, x1, y1, q.depth);
         }
     }
 }
@@ -133,8 +170,6 @@ fn rasterize(
 
     let block_x0 = workgroup_id.x * BLOCK_SIZE;
     let block_y0 = workgroup_id.y * BLOCK_SIZE;
-    let block_x1 = (workgroup_id.x + 1) * BLOCK_SIZE;
-    let block_y1 = (workgroup_id.y + 1) * BLOCK_SIZE;
 
     let start_index = indices[workgroup_index];
     let end_index = indices[workgroup_index + 1];
@@ -157,24 +192,19 @@ fn rasterize(
 
         var q = QUAD_ZERO;
         if i < end_index {
-            q = quads[blocks[i]];
-
-            q.x0 = max(q.x0, block_x0);
-            q.y0 = max(q.y0, block_y0);
-            q.x1 = min(q.x1, block_x1);
-            q.y1 = min(q.y1, block_y1);
+            q = toNormQuad(norm_quads[i]);
         }
 
-        for (var x = q.x0 - block_x0; x < q.x1 - block_x0; x++) {
-            for (var y = q.y0 - block_y0; y < q.y1 - block_y0; y++) {
+        for (var x = q.x0; x < q.x1; x++) {
+            for (var y = q.y0; y < q.y1; y++) {
                 atomicMax(&cells[y * BLOCK_SIZE + x].depth, q.depth);
             }
         }
 
         workgroupBarrier();
 
-        for (var x = q.x0 - block_x0; x < q.x1 - block_x0; x++) {
-            for (var y = q.y0 - block_y0; y < q.y1 - block_y0; y++) {
+        for (var x = q.x0; x < q.x1; x++) {
+            for (var y = q.y0; y < q.y1; y++) {
                 if atomicLoad(&cells[y * BLOCK_SIZE + x].depth) == q.depth {
                     cells[y * BLOCK_SIZE + x].index = i;
                 }
