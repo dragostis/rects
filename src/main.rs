@@ -330,6 +330,16 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, quads: &[Quad]) 
             zero_initialize_workgroup_memory: false,
         },
     });
+    let scatter_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("scatter_pipeline"),
+        layout: None,
+        module: &shader_module,
+        entry_point: "scatter",
+        compilation_options: wgpu::PipelineCompilationOptions {
+            constants: &[].into(),
+            zero_initialize_workgroup_memory: false,
+        },
+    });
     let rasterize_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("rasterize_pipeline"),
         layout: None,
@@ -343,6 +353,7 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, quads: &[Quad]) 
 
     let count_bind_group_layout = count_pipeline.get_bind_group_layout(0);
     let prefix_sum_bind_group_layout = prefix_sum_pipeline.get_bind_group_layout(0);
+    let scatter_bind_group_layout = scatter_pipeline.get_bind_group_layout(0);
     let rasterize_bind_group_layout = rasterize_pipeline.get_bind_group_layout(0);
 
     let (indices, blocks) = split_into_blocks(quads);
@@ -416,6 +427,24 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, quads: &[Quad]) 
             resource: count_buffer.as_entire_binding(),
         }],
     });
+    let scatter_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("scatter_bind_group"),
+        layout: &scatter_bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: quad_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: count_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: block_buffer.as_entire_binding(),
+            },
+        ],
+    });
     let rasterize_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("rasterize_bind_group"),
         layout: &rasterize_bind_group_layout,
@@ -441,7 +470,7 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, quads: &[Quad]) 
         ],
     });
 
-    let mut queries = Queries::new(&device, 4);
+    let mut queries = Queries::new(&device, 5);
 
     queries.write_next_timestamp(&mut encoder);
 
@@ -467,6 +496,19 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, quads: &[Quad]) 
         cpass.set_pipeline(&prefix_sum_pipeline);
         cpass.set_bind_group(0, &prefix_sum_bind_group, &[]);
         cpass.dispatch_workgroups(1, 1, 1);
+    }
+
+    queries.write_next_timestamp(&mut encoder);
+
+    {
+        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: None,
+            timestamp_writes: None,
+        });
+
+        cpass.set_pipeline(&scatter_pipeline);
+        cpass.set_bind_group(0, &scatter_bind_group, &[]);
+        cpass.dispatch_workgroups(QUADS_LEN.div_ceil(256) as u32, 1, 1);
     }
 
     queries.write_next_timestamp(&mut encoder);
