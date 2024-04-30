@@ -591,12 +591,8 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, quads: &[Quad]) 
     output.write_all(&bytes).unwrap();
 }
 
-fn main() {
-    let event_loop = EventLoop::new().unwrap();
-    let window = WindowBuilder::new().build(&event_loop).unwrap();
-
-    let mut rng = StdRng::seed_from_u64(42);
-    let quads: Vec<_> = (0..QUADS_LEN)
+fn gen_uniformly_random_quads<R: Rng>(rng: &mut R) -> Vec<Quad> {
+    (0..QUADS_LEN)
         .into_iter()
         .map(|_| {
             const MAX_SIZE: u32 = 4;
@@ -612,7 +608,46 @@ fn main() {
                 depth: rng.gen_range(0..=1_024),
             }
         })
-        .collect();
+        .collect()
+}
+
+fn gen_clustered_random_quads<R: Rng>(rng: &mut R) -> Vec<Quad> {
+    fn new_cluster<R: Rng>(rng: &mut R) -> [u32; 2] {
+        [rng.gen_range(0..=WIDTH), rng.gen_range(0..=HEIGHT)]
+    }
+
+    (0..QUADS_LEN)
+        .into_iter()
+        .scan(new_cluster(rng), |state, _| {
+            if rng.gen_bool(1.0 / 16.0) {
+                *state = new_cluster(rng);
+            }
+
+            let cluster = *state;
+
+            const MAX_SIZE: u32 = 4;
+
+            let x0 = rng.gen_range(cluster[0]..=cluster[0] + BLOCK_SIZE);
+            let y0 = rng.gen_range(cluster[1]..=cluster[1] + BLOCK_SIZE);
+
+            Some(Quad {
+                x0,
+                y0,
+                x1: (rng.gen_range(1..=MAX_SIZE) + x0).min(WIDTH),
+                y1: (rng.gen_range(1..=MAX_SIZE) + y0).min(HEIGHT),
+                depth: rng.gen_range(0..=1_024),
+            })
+        })
+        .collect()
+}
+
+fn main() {
+    let event_loop = EventLoop::new().unwrap();
+    let window = WindowBuilder::new().build(&event_loop).unwrap();
+
+    let mut rng = StdRng::seed_from_u64(42);
+    // let quads = gen_uniformly_random_quads(&mut rng);
+    let quads = gen_clustered_random_quads(&mut rng);
 
     // let quads = [
     //     Quad {
