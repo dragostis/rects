@@ -1,4 +1,4 @@
-use std::{borrow::Cow, collections::BTreeMap, fs::File, io::Write, iter, mem};
+use std::{borrow::Cow, fs::File, io::Write, mem};
 
 use bytemuck::{Pod, Zeroable};
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -13,7 +13,7 @@ mod query;
 
 use query::Queries;
 
-const QUADS_LEN: usize = 3_700_000;
+const RECTS_LEN: usize = 3_700_000;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -243,37 +243,6 @@ const BLOCK_SIZE: u32 = 16;
 const WIDTH: u32 = 4_096;
 const HEIGHT: u32 = 2_048;
 
-fn split_into_blocks(rects: &[Rect]) -> (Vec<u32>, Vec<u32>) {
-    let mut blocks = BTreeMap::new();
-
-    for (i, r) in rects.iter().enumerate() {
-        let i = i as u32;
-
-        for x in r.x0 / BLOCK_SIZE..r.x1.div_ceil(BLOCK_SIZE) {
-            for y in r.y0 / BLOCK_SIZE..r.y1.div_ceil(BLOCK_SIZE) {
-                blocks
-                    .entry((y, x))
-                    .and_modify(|indices: &mut Vec<u32>| indices.push(i))
-                    .or_insert_with(|| vec![i]);
-            }
-        }
-    }
-
-    let indices = blocks
-        .values()
-        .map(|b| b.len() as u32)
-        .chain(iter::once(0))
-        .scan(0, |state, len| {
-            let next_index = *state + len;
-            Some(mem::replace(state, next_index))
-        })
-        .collect();
-
-    let blocks = blocks.values().flatten().copied().collect();
-
-    (indices, blocks)
-}
-
 async fn run_compute(event_loop: EventLoop<()>, window: Window, rects: &[Rect]) {
     let mut size = window.inner_size();
     size.width = size.width.max(1);
@@ -356,8 +325,6 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, rects: &[Rect]) 
     let scatter_bind_group_layout = scatter_pipeline.get_bind_group_layout(0);
     let rasterize_bind_group_layout = rasterize_pipeline.get_bind_group_layout(0);
 
-    let (indices, blocks) = split_into_blocks(rects);
-
     let rect_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("rect_buffer"),
         contents: bytemuck::cast_slice(&rects),
@@ -373,7 +340,8 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, rects: &[Rect]) 
     });
     let norm_rect_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("norm_rect_buffer"),
-        size: blocks.len() as u64 * mem::size_of::<[u32; 2]>() as u64,
+        // Better estimate here would be nice.
+        size: (rects.len() * 4 * mem::size_of::<[u32; 2]>()) as u64,
         usage: wgpu::BufferUsages::STORAGE,
         mapped_at_creation: false,
     });
@@ -474,7 +442,7 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, rects: &[Rect]) 
 
         cpass.set_pipeline(&count_pipeline);
         cpass.set_bind_group(0, &count_bind_group, &[]);
-        cpass.dispatch_workgroups(QUADS_LEN.div_ceil(256) as u32, 1, 1);
+        cpass.dispatch_workgroups(RECTS_LEN.div_ceil(256) as u32, 1, 1);
     }
 
     queries.write_next_timestamp(&mut encoder);
@@ -500,7 +468,7 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, rects: &[Rect]) 
 
         cpass.set_pipeline(&scatter_pipeline);
         cpass.set_bind_group(0, &scatter_bind_group, &[]);
-        cpass.dispatch_workgroups(QUADS_LEN.div_ceil(256) as u32, 1, 1);
+        cpass.dispatch_workgroups(RECTS_LEN.div_ceil(256) as u32, 1, 1);
     }
 
     queries.write_next_timestamp(&mut encoder);
@@ -584,7 +552,7 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, rects: &[Rect]) 
 }
 
 fn gen_uniformly_random_rects<R: Rng>(rng: &mut R) -> Vec<Rect> {
-    (0..QUADS_LEN)
+    (0..RECTS_LEN)
         .into_iter()
         .map(|_| {
             const MAX_SIZE: u32 = 4;
@@ -608,7 +576,7 @@ fn gen_clustered_random_rects<R: Rng>(rng: &mut R) -> Vec<Rect> {
         [rng.gen_range(0..=WIDTH), rng.gen_range(0..=HEIGHT)]
     }
 
-    (0..QUADS_LEN)
+    (0..RECTS_LEN)
         .into_iter()
         .scan(new_cluster(rng), |state, _| {
             if rng.gen_bool(1.0 / 16.0) {
