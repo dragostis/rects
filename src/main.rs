@@ -1,4 +1,4 @@
-use std::{borrow::Cow, fs::File, io::Write, mem};
+use std::{borrow::Cow, fs::File, io::Write, mem, time::Duration};
 
 use bytemuck::{Pod, Zeroable};
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -239,7 +239,7 @@ async fn run_triangles(event_loop: EventLoop<()>, window: Window, rects: &[Rect]
         .unwrap();
 }
 
-const BLOCK_SIZE: u32 = 16;
+const BLOCK_SIZE: u32 = 32;
 const WIDTH: u32 = 4_096;
 const HEIGHT: u32 = 2_048;
 
@@ -514,7 +514,11 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, rects: &[Rect]) 
     let values = depth_buffer.slice(..);
     values.map_async(wgpu::MapMode::Read, |_| ());
 
-    dbg!(queries.wait_for_results(&device, &queue));
+    let timings = queries.wait_for_results(&device, &queue);
+    let total: Duration = timings.iter().sum();
+
+    dbg!(timings);
+    dbg!(total);
 
     let slice = values.get_mapped_range();
     let values: &[[u32; 2]] = bytemuck::cast_slice(&slice);
@@ -608,23 +612,6 @@ fn main() {
     let mut rng = StdRng::seed_from_u64(42);
     let rects = gen_uniformly_random_rects(&mut rng);
     // let rects = gen_clustered_random_rects(&mut rng);
-
-    // let rects = [
-    //     Rect {
-    //         x0: 10,
-    //         y0: 10,
-    //         x1: 210,
-    //         y1: 210,
-    //         depth: 1,
-    //     },
-    //     Rect {
-    //         x0: 50,
-    //         y0: 50,
-    //         x1: 250,
-    //         y1: 250,
-    //         depth: 2,
-    //     },
-    // ];
 
     // pollster::block_on(run_triangles(event_loop, window, &rects));
     pollster::block_on(run_compute(event_loop, window, &rects));

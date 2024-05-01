@@ -1,6 +1,7 @@
-const BLOCK_SIZE = 16u;
+const BLOCK_SIZE = 32u;
 const BLOCK_SIZE_SQUARE = BLOCK_SIZE * BLOCK_SIZE;
 const WORKGOUP_SIZE = 256u;
+const COORD_BITS = countTrailingZeros(BLOCK_SIZE) + 1;
 
 struct Rect {
     x0: u32,
@@ -26,20 +27,20 @@ fn newNormRect(
 ) -> NormRect {
     var coords = 0u;
 
-    coords = insertBits(coords, x0, 0u, 6u);
-    coords = insertBits(coords, y0, 6u, 6u);
-    coords = insertBits(coords, x1, 12u, 6u);
-    coords = insertBits(coords, y1, 18u, 6u);
+    coords = insertBits(coords, x0, COORD_BITS * 0, COORD_BITS);
+    coords = insertBits(coords, y0, COORD_BITS * 1, COORD_BITS);
+    coords = insertBits(coords, x1, COORD_BITS * 2, COORD_BITS);
+    coords = insertBits(coords, y1, COORD_BITS * 3, COORD_BITS);
 
     return NormRect(coords, depth);
 }
 
 fn toNormRect(r: NormRect) -> Rect {
     return Rect(
-        extractBits(r.coords, 0u, 6u),
-        extractBits(r.coords, 6u, 6u),
-        extractBits(r.coords, 12u, 6u),
-        extractBits(r.coords, 18u, 6u),
+        extractBits(r.coords, COORD_BITS * 0, COORD_BITS),
+        extractBits(r.coords, COORD_BITS * 1, COORD_BITS),
+        extractBits(r.coords, COORD_BITS * 2, COORD_BITS),
+        extractBits(r.coords, COORD_BITS * 3, COORD_BITS),
         r.depth,
     );
 }
