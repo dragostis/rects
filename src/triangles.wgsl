@@ -1,5 +1,5 @@
 struct VertexOutput {
-    @location(0) quad_index: u32,
+    @location(0) rect_index: u32,
     @builtin(position) position: vec4<f32>,
 };
 
@@ -30,5 +30,5 @@ fn vs_main(
 
 @fragment
 fn fs_main(vertex: VertexOutput) -> @location(0) vec4<f32> {
-    return colorFromIndex(vertex.quad_index);
+    return colorFromIndex(vertex.rect_index);
 }

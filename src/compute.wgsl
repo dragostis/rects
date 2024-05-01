@@ -2,7 +2,7 @@ const BLOCK_SIZE = 16u;
 const BLOCK_SIZE_SQUARE = BLOCK_SIZE * BLOCK_SIZE;
 const WORKGOUP_SIZE = 256u;
 
-struct Quad {
+struct Rect {
     x0: u32,
     y0: u32,
     x1: u32,
@@ -10,20 +10,20 @@ struct Quad {
     depth: u32,
 }
 
-const QUAD_ZERO = Quad(0, 0, 0, 0, 0);
+const RECT_ZERO = Rect(0, 0, 0, 0, 0);
 
-struct NormQuad {
+struct NormRect {
     coords: u32,
     depth: u32,
 }
 
-fn newNormQuad(
+fn newNormRect(
     x0: u32,
     y0: u32,
     x1: u32,
     y1: u32,
     depth: u32,
-) -> NormQuad {
+) -> NormRect {
     var coords = 0u;
 
     coords = insertBits(coords, x0, 0u, 6u);
@@ -31,28 +31,28 @@ fn newNormQuad(
     coords = insertBits(coords, x1, 12u, 6u);
     coords = insertBits(coords, y1, 18u, 6u);
 
-    return NormQuad(coords, depth);
+    return NormRect(coords, depth);
 }
 
-fn toNormQuad(q: NormQuad) -> Quad {
-    return Quad(
-        extractBits(q.coords, 0u, 6u),
-        extractBits(q.coords, 6u, 6u),
-        extractBits(q.coords, 12u, 6u),
-        extractBits(q.coords, 18u, 6u),
-        q.depth,
+fn toNormRect(r: NormRect) -> Rect {
+    return Rect(
+        extractBits(r.coords, 0u, 6u),
+        extractBits(r.coords, 6u, 6u),
+        extractBits(r.coords, 12u, 6u),
+        extractBits(r.coords, 18u, 6u),
+        r.depth,
     );
 }
 
 @group(0)
 @binding(0)
-var<storage> quads: array<Quad>;
+var<storage> rects: array<Rect>;
 @group(0)
 @binding(1)
 var<storage, read_write> counts: array<atomic<u32>>;
 @group(0)
 @binding(2)
-var<storage, read_write> norm_quads: array<NormQuad>;
+var<storage, read_write> norm_rects: array<NormRect>;
 @group(0)
 @binding(3)
 var depth_texture: texture_storage_2d<rg32uint, write>;
@@ -62,10 +62,10 @@ var depth_texture: texture_storage_2d<rg32uint, write>;
 fn count(
     @builtin(global_invocation_id) global_id: vec3<u32>,
 ) {
-    let q = quads[global_id.x];
+    let r = rects[global_id.x];
 
-    for (var x = q.x0 / BLOCK_SIZE; x < (q.x1 + BLOCK_SIZE - 1) / BLOCK_SIZE; x++) {
-        for (var y = q.y0 / BLOCK_SIZE; y < (q.y1 + BLOCK_SIZE - 1) / BLOCK_SIZE; y++) {
+    for (var x = r.x0 / BLOCK_SIZE; x < (r.x1 + BLOCK_SIZE - 1) / BLOCK_SIZE; x++) {
+        for (var y = r.y0 / BLOCK_SIZE; y < (r.y1 + BLOCK_SIZE - 1) / BLOCK_SIZE; y++) {
             atomicAdd(&counts[y * (4096 / BLOCK_SIZE) + x], 1u);
         }
     }
@@ -133,18 +133,18 @@ fn prefixSum(
 fn scatter(
     @builtin(global_invocation_id) global_id: vec3<u32>,
 ) {
-    let q = quads[global_id.x];
+    let r = rects[global_id.x];
 
-    for (var x = q.x0 / BLOCK_SIZE; x < (q.x1 + BLOCK_SIZE - 1) / BLOCK_SIZE; x++) {
-        for (var y = q.y0 / BLOCK_SIZE; y < (q.y1 + BLOCK_SIZE - 1) / BLOCK_SIZE; y++) {
+    for (var x = r.x0 / BLOCK_SIZE; x < (r.x1 + BLOCK_SIZE - 1) / BLOCK_SIZE; x++) {
+        for (var y = r.y0 / BLOCK_SIZE; y < (r.y1 + BLOCK_SIZE - 1) / BLOCK_SIZE; y++) {
             let i = atomicAdd(&counts[y * (4096 / BLOCK_SIZE) + x], 1u);
 
-            let x0 = u32(max(i32(q.x0) - i32(x * BLOCK_SIZE), 0));
-            let y0 = u32(max(i32(q.y0) - i32(y * BLOCK_SIZE), 0));
-            let x1 = min(q.x1 - x * BLOCK_SIZE, BLOCK_SIZE);
-            let y1 = min(q.y1 - y * BLOCK_SIZE, BLOCK_SIZE);
+            let x0 = u32(max(i32(r.x0) - i32(x * BLOCK_SIZE), 0));
+            let y0 = u32(max(i32(r.y0) - i32(y * BLOCK_SIZE), 0));
+            let x1 = min(r.x1 - x * BLOCK_SIZE, BLOCK_SIZE);
+            let y1 = min(r.y1 - y * BLOCK_SIZE, BLOCK_SIZE);
 
-            norm_quads[i] = newNormQuad(x0, y0, x1, y1, q.depth);
+            norm_rects[i] = newNormRect(x0, y0, x1, y1, r.depth);
         }
     }
 }
@@ -190,22 +190,22 @@ fn rasterize(
     for (var j = 0u; j < (len + WORKGOUP_SIZE - 1) / WORKGOUP_SIZE; j++) {
         let i = start_index + j * WORKGOUP_SIZE + local_index;
 
-        var q = QUAD_ZERO;
+        var r = RECT_ZERO;
         if i < end_index {
-            q = toNormQuad(norm_quads[i]);
+            r = toNormRect(norm_rects[i]);
         }
 
-        for (var x = q.x0; x < q.x1; x++) {
-            for (var y = q.y0; y < q.y1; y++) {
-                atomicMax(&cells[y * BLOCK_SIZE + x].depth, q.depth);
+        for (var x = r.x0; x < r.x1; x++) {
+            for (var y = r.y0; y < r.y1; y++) {
+                atomicMax(&cells[y * BLOCK_SIZE + x].depth, r.depth);
             }
         }
 
         workgroupBarrier();
 
-        for (var x = q.x0; x < q.x1; x++) {
-            for (var y = q.y0; y < q.y1; y++) {
-                if atomicLoad(&cells[y * BLOCK_SIZE + x].depth) == q.depth {
+        for (var x = r.x0; x < r.x1; x++) {
+            for (var y = r.y0; y < r.y1; y++) {
+                if atomicLoad(&cells[y * BLOCK_SIZE + x].depth) == r.depth {
                     cells[y * BLOCK_SIZE + x].index = i;
                 }
             }

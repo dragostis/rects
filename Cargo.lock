@@ -1009,17 +1009,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "43d84d1d7a6ac92673717f9f6d1518374ef257669c24ebc5ac25d5033828be58"
 
 [[package]]
-name = "quads"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "pollster",
- "rand",
- "wgpu",
- "winit",
-]
-
-[[package]]
 name = "quick-xml"
 version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1078,6 +1067,17 @@ name = "raw-window-handle"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8cc3bcbdb1ddfc11e700e62968e6b4cc9c75bb466464ad28fb61c5b2c964418b"
+
+[[package]]
+name = "rects"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "pollster",
+ "rand",
+ "wgpu",
+ "winit",
+]
 
 [[package]]
 name = "redox_syscall"

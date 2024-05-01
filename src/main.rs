@@ -17,7 +17,7 @@ const QUADS_LEN: usize = 3_700_000;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
-struct Quad {
+struct Rect {
     x0: u32,
     y0: u32,
     x1: u32,
@@ -25,7 +25,7 @@ struct Quad {
     depth: u32,
 }
 
-async fn run_triangles(event_loop: EventLoop<()>, window: Window, quads: &[Quad]) {
+async fn run_triangles(event_loop: EventLoop<()>, window: Window, rects: &[Rect]) {
     let mut size = window.inner_size();
     size.width = size.width.max(1);
     size.height = size.height.max(1);
@@ -82,7 +82,7 @@ async fn run_triangles(event_loop: EventLoop<()>, window: Window, quads: &[Quad]
             push_constant_ranges: &[],
         });
 
-    let vertices: Vec<f32> = quads
+    let vertices: Vec<f32> = rects
         .iter()
         .map(|q| {
             let depth = q.depth as f32 / 1_024.0;
@@ -243,14 +243,14 @@ const BLOCK_SIZE: u32 = 16;
 const WIDTH: u32 = 4_096;
 const HEIGHT: u32 = 2_048;
 
-fn split_into_blocks(quads: &[Quad]) -> (Vec<u32>, Vec<u32>) {
+fn split_into_blocks(rects: &[Rect]) -> (Vec<u32>, Vec<u32>) {
     let mut blocks = BTreeMap::new();
 
-    for (i, q) in quads.iter().enumerate() {
+    for (i, r) in rects.iter().enumerate() {
         let i = i as u32;
 
-        for x in q.x0 / BLOCK_SIZE..q.x1.div_ceil(BLOCK_SIZE) {
-            for y in q.y0 / BLOCK_SIZE..q.y1.div_ceil(BLOCK_SIZE) {
+        for x in r.x0 / BLOCK_SIZE..r.x1.div_ceil(BLOCK_SIZE) {
+            for y in r.y0 / BLOCK_SIZE..r.y1.div_ceil(BLOCK_SIZE) {
                 blocks
                     .entry((y, x))
                     .and_modify(|indices: &mut Vec<u32>| indices.push(i))
@@ -274,7 +274,7 @@ fn split_into_blocks(quads: &[Quad]) -> (Vec<u32>, Vec<u32>) {
     (indices, blocks)
 }
 
-async fn run_compute(event_loop: EventLoop<()>, window: Window, quads: &[Quad]) {
+async fn run_compute(event_loop: EventLoop<()>, window: Window, rects: &[Rect]) {
     let mut size = window.inner_size();
     size.width = size.width.max(1);
     size.height = size.height.max(1);
@@ -356,11 +356,11 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, quads: &[Quad]) 
     let scatter_bind_group_layout = scatter_pipeline.get_bind_group_layout(0);
     let rasterize_bind_group_layout = rasterize_pipeline.get_bind_group_layout(0);
 
-    let (indices, blocks) = split_into_blocks(quads);
+    let (indices, blocks) = split_into_blocks(rects);
 
-    let quad_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("quad_buffer"),
-        contents: bytemuck::cast_slice(&quads),
+    let rect_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("rect_buffer"),
+        contents: bytemuck::cast_slice(&rects),
         usage: wgpu::BufferUsages::STORAGE,
     });
     let count_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -371,8 +371,8 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, quads: &[Quad]) 
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
-    let norm_quad_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("norm_quad_buffer"),
+    let norm_rect_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("norm_rect_buffer"),
         size: blocks.len() as u64 * mem::size_of::<[u32; 2]>() as u64,
         usage: wgpu::BufferUsages::STORAGE,
         mapped_at_creation: false,
@@ -407,7 +407,7 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, quads: &[Quad]) 
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: quad_buffer.as_entire_binding(),
+                resource: rect_buffer.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
@@ -429,7 +429,7 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, quads: &[Quad]) 
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: quad_buffer.as_entire_binding(),
+                resource: rect_buffer.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
@@ -437,7 +437,7 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, quads: &[Quad]) 
             },
             wgpu::BindGroupEntry {
                 binding: 2,
-                resource: norm_quad_buffer.as_entire_binding(),
+                resource: norm_rect_buffer.as_entire_binding(),
             },
         ],
     });
@@ -451,7 +451,7 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, quads: &[Quad]) 
             },
             wgpu::BindGroupEntry {
                 binding: 2,
-                resource: norm_quad_buffer.as_entire_binding(),
+                resource: norm_rect_buffer.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 3,
@@ -583,7 +583,7 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, quads: &[Quad]) 
     output.write_all(&bytes).unwrap();
 }
 
-fn gen_uniformly_random_quads<R: Rng>(rng: &mut R) -> Vec<Quad> {
+fn gen_uniformly_random_rects<R: Rng>(rng: &mut R) -> Vec<Rect> {
     (0..QUADS_LEN)
         .into_iter()
         .map(|_| {
@@ -592,7 +592,7 @@ fn gen_uniformly_random_quads<R: Rng>(rng: &mut R) -> Vec<Quad> {
             let x0 = rng.gen_range(0..=WIDTH);
             let y0 = rng.gen_range(0..=HEIGHT);
 
-            Quad {
+            Rect {
                 x0,
                 y0,
                 x1: (rng.gen_range(1..=MAX_SIZE) + x0).min(WIDTH),
@@ -603,7 +603,7 @@ fn gen_uniformly_random_quads<R: Rng>(rng: &mut R) -> Vec<Quad> {
         .collect()
 }
 
-fn gen_clustered_random_quads<R: Rng>(rng: &mut R) -> Vec<Quad> {
+fn gen_clustered_random_rects<R: Rng>(rng: &mut R) -> Vec<Rect> {
     fn new_cluster<R: Rng>(rng: &mut R) -> [u32; 2] {
         [rng.gen_range(0..=WIDTH), rng.gen_range(0..=HEIGHT)]
     }
@@ -622,7 +622,7 @@ fn gen_clustered_random_quads<R: Rng>(rng: &mut R) -> Vec<Quad> {
             let x0 = rng.gen_range(cluster[0]..=cluster[0] + BLOCK_SIZE);
             let y0 = rng.gen_range(cluster[1]..=cluster[1] + BLOCK_SIZE);
 
-            Some(Quad {
+            Some(Rect {
                 x0,
                 y0,
                 x1: (rng.gen_range(1..=MAX_SIZE) + x0).min(WIDTH),
@@ -638,18 +638,18 @@ fn main() {
     let window = WindowBuilder::new().build(&event_loop).unwrap();
 
     let mut rng = StdRng::seed_from_u64(42);
-    let quads = gen_uniformly_random_quads(&mut rng);
-    // let quads = gen_clustered_random_quads(&mut rng);
+    let rects = gen_uniformly_random_rects(&mut rng);
+    // let rects = gen_clustered_random_rects(&mut rng);
 
-    // let quads = [
-    //     Quad {
+    // let rects = [
+    //     Rect {
     //         x0: 10,
     //         y0: 10,
     //         x1: 210,
     //         y1: 210,
     //         depth: 1,
     //     },
-    //     Quad {
+    //     Rect {
     //         x0: 50,
     //         y0: 50,
     //         x1: 250,
@@ -658,6 +658,6 @@ fn main() {
     //     },
     // ];
 
-    // pollster::block_on(run_triangles(event_loop, window, &quads));
-    pollster::block_on(run_compute(event_loop, window, &quads));
+    // pollster::block_on(run_triangles(event_loop, window, &rects));
+    pollster::block_on(run_compute(event_loop, window, &rects));
 }
