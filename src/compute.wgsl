@@ -55,9 +55,6 @@ var<storage, read_write> counts: array<atomic<u32>>;
 var<storage, read_write> norm_quads: array<NormQuad>;
 @group(0)
 @binding(3)
-var<storage> indices: array<u32>;
-@group(0)
-@binding(4)
 var depth_texture: texture_storage_2d<rg32uint, write>;
 
 @compute
@@ -171,8 +168,11 @@ fn rasterize(
     let block_x0 = workgroup_id.x * BLOCK_SIZE;
     let block_y0 = workgroup_id.y * BLOCK_SIZE;
 
-    let start_index = indices[workgroup_index];
-    let end_index = indices[workgroup_index + 1];
+    var start_index = 0u;
+    if workgroup_index > 0 {
+        start_index = counts[workgroup_index - 1];
+    }
+    let end_index = counts[workgroup_index];
     let len = end_index - start_index;
 
     for (var j = 0u; j < BLOCK_SIZE_SQUARE / WORKGOUP_SIZE; j++) {

@@ -377,11 +377,6 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, quads: &[Quad]) 
         usage: wgpu::BufferUsages::STORAGE,
         mapped_at_creation: false,
     });
-    let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("index_buffer"),
-        contents: bytemuck::cast_slice(&indices),
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-    });
     let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("depth_texture"),
         size: wgpu::Extent3d {
@@ -451,15 +446,15 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, quads: &[Quad]) 
         layout: &rasterize_bind_group_layout,
         entries: &[
             wgpu::BindGroupEntry {
+                binding: 1,
+                resource: count_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
                 binding: 2,
                 resource: norm_quad_buffer.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 3,
-                resource: index_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 4,
                 resource: wgpu::BindingResource::TextureView(
                     &depth_texture.create_view(&wgpu::TextureViewDescriptor::default()),
                 ),
@@ -467,7 +462,7 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, quads: &[Quad]) 
         ],
     });
 
-    let mut queries = Queries::new(&device, 6);
+    let mut queries = Queries::new(&device, 5);
 
     queries.write_next_timestamp(&mut encoder);
 
@@ -507,8 +502,6 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, quads: &[Quad]) 
         cpass.set_bind_group(0, &scatter_bind_group, &[]);
         cpass.dispatch_workgroups(QUADS_LEN.div_ceil(256) as u32, 1, 1);
     }
-
-    encoder.copy_buffer_to_buffer(&count_buffer, 0, &index_buffer, 0, count_buffer.size());
 
     queries.write_next_timestamp(&mut encoder);
 
