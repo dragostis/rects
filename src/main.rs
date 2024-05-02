@@ -246,7 +246,7 @@ async fn run_triangles(event_loop: EventLoop<()>, window: Window, rects: &[Rect]
         .unwrap();
 }
 
-const BLOCK_SIZE: u32 = 32;
+const TILE_SIZE: u32 = 32;
 const WIDTH: u32 = 3_840;
 const HEIGHT: u32 = 2_160;
 
@@ -272,8 +272,7 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, rects: &[Rect]) 
             &wgpu::DeviceDescriptor {
                 label: None,
                 required_features: wgpu::Features::TIMESTAMP_QUERY
-                    | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS
-                    | wgpu::Features::SUBGROUP,
+                    | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
                 required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
             },
             None,
@@ -347,8 +346,8 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, rects: &[Rect]) 
     });
     let count_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("count_buffer"),
-        size: WIDTH.div_ceil(BLOCK_SIZE) as u64
-            * HEIGHT.div_ceil(BLOCK_SIZE) as u64
+        size: WIDTH.div_ceil(TILE_SIZE) as u64
+            * HEIGHT.div_ceil(TILE_SIZE) as u64
             * mem::size_of::<u32>() as u64,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
@@ -508,7 +507,7 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, rects: &[Rect]) 
 
         cpass.set_pipeline(&rasterize_pipeline);
         cpass.set_bind_group(0, &rasterize_bind_group, &[]);
-        cpass.dispatch_workgroups(WIDTH.div_ceil(BLOCK_SIZE), HEIGHT.div_ceil(BLOCK_SIZE), 1);
+        cpass.dispatch_workgroups(WIDTH.div_ceil(TILE_SIZE), HEIGHT.div_ceil(TILE_SIZE), 1);
     }
 
     queries.write_next_timestamp(&mut encoder);
@@ -618,8 +617,8 @@ fn gen_clustered_random_rects<R: Rng>(rng: &mut R) -> Vec<Rect> {
 
             const MAX_SIZE: u32 = 4;
 
-            let x0 = rng.gen_range(cluster[0]..=cluster[0] + BLOCK_SIZE);
-            let y0 = rng.gen_range(cluster[1]..=cluster[1] + BLOCK_SIZE);
+            let x0 = rng.gen_range(cluster[0]..=cluster[0] + TILE_SIZE);
+            let y0 = rng.gen_range(cluster[1]..=cluster[1] + TILE_SIZE);
 
             Some(Rect {
                 x0,

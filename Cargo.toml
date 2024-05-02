@@ -9,5 +9,5 @@ edition = "2021"
 bytemuck = { version = "1.15.0", features = ["derive"] }
 pollster = "0.3.0"
 rand = "0.8.5"
-wgpu = { git = "https://github.com/gfx-rs/wgpu", rev = "a364e56" }
+wgpu = "0.20.0"
 winit = "0.29.15"
