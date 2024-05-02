@@ -3,6 +3,11 @@ const BLOCK_SIZE_SQUARE = BLOCK_SIZE * BLOCK_SIZE;
 const WORKGOUP_SIZE = 256u;
 const COORD_BITS = countTrailingZeros(BLOCK_SIZE) + 1;
 
+struct Config {
+    width: u32,
+    height: u32,
+}
+
 struct Rect {
     x0: u32,
     y0: u32,
@@ -45,17 +50,24 @@ fn toNormRect(r: NormRect) -> Rect {
     );
 }
 
+fn div_ceil(a: u32, b: u32) -> u32 {
+    return (a + b - 1) / b;
+}
+
 @group(0)
 @binding(0)
-var<storage> rects: array<Rect>;
+var<uniform> config: Config;
 @group(0)
 @binding(1)
-var<storage, read_write> counts: array<atomic<u32>>;
+var<storage> rects: array<Rect>;
 @group(0)
 @binding(2)
-var<storage, read_write> norm_rects: array<NormRect>;
+var<storage, read_write> counts: array<atomic<u32>>;
 @group(0)
 @binding(3)
+var<storage, read_write> norm_rects: array<NormRect>;
+@group(0)
+@binding(4)
 var depth_texture: texture_storage_2d<rg32uint, write>;
 
 @compute
@@ -63,11 +75,15 @@ var depth_texture: texture_storage_2d<rg32uint, write>;
 fn count(
     @builtin(global_invocation_id) global_id: vec3<u32>,
 ) {
+    if global_id.x >= arrayLength(&rects) {
+        return;
+    }
+
     let r = rects[global_id.x];
 
     for (var x = r.x0 / BLOCK_SIZE; x < (r.x1 + BLOCK_SIZE - 1) / BLOCK_SIZE; x++) {
         for (var y = r.y0 / BLOCK_SIZE; y < (r.y1 + BLOCK_SIZE - 1) / BLOCK_SIZE; y++) {
-            atomicAdd(&counts[y * (4096 / BLOCK_SIZE) + x], 1u);
+            atomicAdd(&counts[y * div_ceil(config.width, BLOCK_SIZE) + x], 1u);
         }
     }
 }
@@ -114,12 +130,19 @@ fn prefixSum(
 
     workgroupBarrier();
 
-    for (var i = 0u; i < (arrayLength(&counts) + WORKGOUP_SIZE - 1) / WORKGOUP_SIZE; i++) {
-        let val = counts[i * WORKGOUP_SIZE + local_index];
+    for (var i = 0u; i < div_ceil(arrayLength(&counts), WORKGOUP_SIZE); i++) {
+        let index = i * WORKGOUP_SIZE + local_index;
+
+        var val: u32;
+        if index < arrayLength(&counts) {
+            val = counts[index];
+        }
 
         let sum = workgroupPrefixSum(val, local_index);
 
-        counts[i * WORKGOUP_SIZE + local_index] = sum + carry;
+        if index < arrayLength(&counts) {
+            counts[index] = sum + carry;
+        }
 
         if local_index == WORKGOUP_SIZE - 1 {
             carry += val + sum;
@@ -134,11 +157,15 @@ fn prefixSum(
 fn scatter(
     @builtin(global_invocation_id) global_id: vec3<u32>,
 ) {
+    if global_id.x >= arrayLength(&rects) {
+        return;
+    }
+
     let r = rects[global_id.x];
 
-    for (var x = r.x0 / BLOCK_SIZE; x < (r.x1 + BLOCK_SIZE - 1) / BLOCK_SIZE; x++) {
-        for (var y = r.y0 / BLOCK_SIZE; y < (r.y1 + BLOCK_SIZE - 1) / BLOCK_SIZE; y++) {
-            let i = atomicAdd(&counts[y * (4096 / BLOCK_SIZE) + x], 1u);
+    for (var x = r.x0 / BLOCK_SIZE; x < div_ceil(r.x1, BLOCK_SIZE); x++) {
+        for (var y = r.y0 / BLOCK_SIZE; y < div_ceil(r.y1, BLOCK_SIZE); y++) {
+            let i = atomicAdd(&counts[y * div_ceil(config.width, BLOCK_SIZE) + x], 1u);
 
             let x0 = u32(max(i32(r.x0) - i32(x * BLOCK_SIZE), 0));
             let y0 = u32(max(i32(r.y0) - i32(y * BLOCK_SIZE), 0));
@@ -188,7 +215,7 @@ fn rasterize(
 
     workgroupBarrier();
 
-    for (var j = 0u; j < (len + WORKGOUP_SIZE - 1) / WORKGOUP_SIZE; j++) {
+    for (var j = 0u; j < div_ceil(len, WORKGOUP_SIZE); j++) {
         let i = start_index + j * WORKGOUP_SIZE + local_index;
 
         var r = RECT_ZERO;
@@ -221,10 +248,12 @@ fn rasterize(
         let x = block_x0 + i % BLOCK_SIZE;
         let y = block_y0 + i / BLOCK_SIZE;
 
-        textureStore(
-            depth_texture,
-            vec2(x, y), 
-            vec4(atomicLoad(&cells[i].depth), cells[i].index, 0u, 0u),
-        );
+        if x < config.width && y < config.height {
+            textureStore(
+                depth_texture,
+                vec2(x, y), 
+                vec4(atomicLoad(&cells[i].depth), cells[i].index, 0u, 0u),
+            );
+        }
     }
 }

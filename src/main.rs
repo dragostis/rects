@@ -25,6 +25,13 @@ struct Rect {
     depth: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct Config {
+    width: u32,
+    height: u32,
+}
+
 async fn run_triangles(event_loop: EventLoop<()>, window: Window, rects: &[Rect]) {
     let mut size = window.inner_size();
     size.width = size.width.max(1);
@@ -240,8 +247,8 @@ async fn run_triangles(event_loop: EventLoop<()>, window: Window, rects: &[Rect]
 }
 
 const BLOCK_SIZE: u32 = 32;
-const WIDTH: u32 = 4_096;
-const HEIGHT: u32 = 2_048;
+const WIDTH: u32 = 3_840;
+const HEIGHT: u32 = 2_160;
 
 async fn run_compute(event_loop: EventLoop<()>, window: Window, rects: &[Rect]) {
     let mut size = window.inner_size();
@@ -325,6 +332,14 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, rects: &[Rect]) 
     let scatter_bind_group_layout = scatter_pipeline.get_bind_group_layout(0);
     let rasterize_bind_group_layout = rasterize_pipeline.get_bind_group_layout(0);
 
+    let config_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("config_buffer"),
+        contents: bytemuck::bytes_of(&Config {
+            width: WIDTH,
+            height: HEIGHT,
+        }),
+        usage: wgpu::BufferUsages::UNIFORM,
+    });
     let rect_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("rect_buffer"),
         contents: bytemuck::cast_slice(&rects),
@@ -375,10 +390,14 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, rects: &[Rect]) 
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: rect_buffer.as_entire_binding(),
+                resource: config_buffer.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
+                resource: rect_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
                 resource: count_buffer.as_entire_binding(),
             },
         ],
@@ -387,7 +406,7 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, rects: &[Rect]) 
         label: Some("prefix_sum_bind_group"),
         layout: &prefix_sum_bind_group_layout,
         entries: &[wgpu::BindGroupEntry {
-            binding: 1,
+            binding: 2,
             resource: count_buffer.as_entire_binding(),
         }],
     });
@@ -397,14 +416,18 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, rects: &[Rect]) 
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: rect_buffer.as_entire_binding(),
+                resource: config_buffer.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: count_buffer.as_entire_binding(),
+                resource: rect_buffer.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 2,
+                resource: count_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
                 resource: norm_rect_buffer.as_entire_binding(),
             },
         ],
@@ -414,15 +437,19 @@ async fn run_compute(event_loop: EventLoop<()>, window: Window, rects: &[Rect]) 
         layout: &rasterize_bind_group_layout,
         entries: &[
             wgpu::BindGroupEntry {
-                binding: 1,
-                resource: count_buffer.as_entire_binding(),
+                binding: 0,
+                resource: config_buffer.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 2,
-                resource: norm_rect_buffer.as_entire_binding(),
+                resource: count_buffer.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 3,
+                resource: norm_rect_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
                 resource: wgpu::BindingResource::TextureView(
                     &depth_texture.create_view(&wgpu::TextureViewDescriptor::default()),
                 ),
