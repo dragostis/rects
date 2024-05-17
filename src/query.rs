@@ -38,9 +38,9 @@ impl Queries {
         self.next_unused_query = 0;
     }
 
-    pub fn write_next_timestamp(&mut self, encoder: &mut wgpu::CommandEncoder) {
+    pub fn write_next_timestamp(&mut self, pass: &mut wgpu::RenderPass) {
         let next_unused_query = self.next_unused_query;
-        encoder.write_timestamp(
+        pass.write_timestamp(
             &self.set,
             mem::replace(&mut self.next_unused_query, next_unused_query + 1),
         );
