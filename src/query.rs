@@ -1,5 +1,21 @@
 use std::{mem, time::Duration};
 
+pub trait Pass {
+    fn write_timestamp(&mut self, query_set: &wgpu::QuerySet, query_index: u32);
+}
+
+impl Pass for wgpu::ComputePass<'_> {
+    fn write_timestamp(&mut self, query_set: &wgpu::QuerySet, query_index: u32) {
+        self.write_timestamp(query_set, query_index);
+    }
+}
+
+impl Pass for wgpu::RenderPass<'_> {
+    fn write_timestamp(&mut self, query_set: &wgpu::QuerySet, query_index: u32) {
+        self.write_timestamp(query_set, query_index);
+    }
+}
+
 #[derive(Debug)]
 pub struct Queries {
     set: wgpu::QuerySet,
@@ -38,7 +54,7 @@ impl Queries {
         self.next_unused_query = 0;
     }
 
-    pub fn write_next_timestamp(&mut self, pass: &mut wgpu::RenderPass) {
+    pub fn write_next_timestamp<P: Pass>(&mut self, pass: &mut P) {
         let next_unused_query = self.next_unused_query;
         pass.write_timestamp(
             &self.set,

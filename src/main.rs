@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 
 use bytemuck::{Pod, Zeroable};
+use wgpu::util::DeviceExt;
 use winit::{
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
@@ -64,10 +65,25 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba16Float,
+        format: wgpu::TextureFormat::Rgba32Float,
         usage: wgpu::TextureUsages::STORAGE_BINDING,
         view_formats: &[],
     });
+    let mut size_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("size_buffer"),
+        contents: bytemuck::bytes_of(&[size.width, size.height]),
+        usage: wgpu::BufferUsages::UNIFORM,
+    });
+
+    let render_gbuffer_pipeline =
+        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("render_gbuffer_pipeline"),
+            layout: None,
+            module: &shader,
+            entry_point: "renderGbuffer",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        });
+    let render_gbuffer_group_layout = render_gbuffer_pipeline.get_bind_group_layout(0);
 
     let display_bind_group_layout =
         device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -77,7 +93,7 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::StorageTexture {
                     access: wgpu::StorageTextureAccess::ReadWrite,
-                    format: wgpu::TextureFormat::Rgba16Float,
+                    format: wgpu::TextureFormat::Rgba32Float,
                     view_dimension: wgpu::TextureViewDimension::D2,
                 },
                 count: None,
@@ -119,7 +135,7 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
         multiview: None,
     });
 
-    let mut queries = Queries::new(&device, 2);
+    let mut queries = Queries::new(&device, 4);
 
     event_loop.set_control_flow(ControlFlow::Poll);
     event_loop
@@ -141,14 +157,24 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
                             mip_level_count: 1,
                             sample_count: 1,
                             dimension: wgpu::TextureDimension::D2,
-                            format: wgpu::TextureFormat::Rgba16Float,
+                            format: wgpu::TextureFormat::Rgba32Float,
                             usage: wgpu::TextureUsages::STORAGE_BINDING,
                             view_formats: &[],
                         });
 
+                        size_buffer.destroy();
+                        size_buffer =
+                            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("size_buffer"),
+                                contents: bytemuck::bytes_of(&[new_size.width, new_size.height]),
+                                usage: wgpu::BufferUsages::UNIFORM,
+                            });
+
                         config.width = new_size.width.max(1);
                         config.height = new_size.height.max(1);
                         surface.configure(&device, &config);
+
+                        size = new_size;
                     }
                     WindowEvent::CloseRequested => target.exit(),
                     _ => (),
@@ -160,7 +186,25 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
                     .texture
                     .create_view(&wgpu::TextureViewDescriptor::default());
 
-                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                let render_gbuffer_bind_group =
+                    device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: None,
+                        layout: &render_gbuffer_group_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &gbuffer.create_view(&wgpu::TextureViewDescriptor::default()),
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: size_buffer.as_entire_binding(),
+                            },
+                        ],
+                    });
+
+                let display_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: None,
                     layout: &display_bind_group_layout,
                     entries: &[wgpu::BindGroupEntry {
@@ -175,6 +219,21 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
                     device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
                 queries.reset();
+
+                {
+                    let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: None,
+                        timestamp_writes: None,
+                    });
+
+                    queries.write_next_timestamp(&mut cpass);
+
+                    cpass.set_pipeline(&render_gbuffer_pipeline);
+                    cpass.set_bind_group(0, &render_gbuffer_bind_group, &[]);
+                    cpass.dispatch_workgroups(size.width.div_ceil(16), size.height.div_ceil(8), 1);
+
+                    queries.write_next_timestamp(&mut cpass);
+                }
 
                 {
                     let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -194,7 +253,7 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 
                     queries.write_next_timestamp(&mut rpass);
 
-                    rpass.set_bind_group(0, &bind_group, &[]);
+                    rpass.set_bind_group(0, &display_bind_group, &[]);
                     rpass.set_pipeline(&display_pipeline);
                     rpass.draw(0..3, 0..1);
 
