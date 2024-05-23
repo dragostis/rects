@@ -19,7 +19,7 @@ impl Plugin for CameraControllerPlugin {
 /// Based on Valorant's default sensitivity, not entirely sure why it is exactly 1.0 / 180.0,
 /// but I'm guessing it is a misunderstanding between degrees/radians and then sticking with
 /// it because it felt nice.
-pub const RADIANS_PER_DOT: f32 = 1.0 / 180.0;
+pub const RADIANS_PER_DOT: f32 = 1.0 / 360.0;
 
 #[derive(Component)]
 pub struct CameraController {

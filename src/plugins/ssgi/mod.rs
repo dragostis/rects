@@ -9,7 +9,7 @@ use bevy::{
             Camera3d,
         },
         fullscreen_vertex_shader::fullscreen_shader_vertex_state,
-        prepass::{DepthPrepass, NormalPrepass, ViewPrepassTextures},
+        prepass::{DeferredPrepass, DepthPrepass, NormalPrepass, ViewPrepassTextures},
     },
     ecs::{
         bundle::Bundle,
@@ -58,7 +58,6 @@ const SPATIAL_DENOISE_SHADER_HANDLE: Handle<Shader> = Handle::weak_from_u128(342
 const SSGI_UTILS_SHADER_HANDLE: Handle<Shader> = Handle::weak_from_u128(69792351744019);
 const POST_PROCESS_SHADER_HANDLE: Handle<Shader> = Handle::weak_from_u128(515340081393064);
 
-/// Plugin for screen space ambient occlusion.
 pub struct ScreenSpaceGlobalIlluminationPlugin;
 
 impl Plugin for ScreenSpaceGlobalIlluminationPlugin {
@@ -120,7 +119,7 @@ impl Plugin for ScreenSpaceGlobalIlluminationPlugin {
         render_app
             .init_resource::<SsgiPipelines>()
             .init_resource::<SpecializedComputePipelines<SsgiPipelines>>()
-            .add_systems(ExtractSchedule, extract_ssao_settings)
+            .add_systems(ExtractSchedule, extract_ssgi_settings)
             .add_systems(
                 Render,
                 (
@@ -144,10 +143,11 @@ impl Plugin for ScreenSpaceGlobalIlluminationPlugin {
     }
 }
 
-#[derive(Bundle, Default, Clone)]
+#[derive(Bundle, Default)]
 pub struct ScreenSpaceGlobalIlluminationBundle {
     pub depth_prepass: DepthPrepass,
     pub normal_prepass: NormalPrepass,
+    pub deferred_prepass: DeferredPrepass,
     pub settings: ScreenSpaceGlobalIlluminationSettings,
 }
 
@@ -255,7 +255,15 @@ impl ViewNode for SsgiNode {
             );
         }
 
+        let post_process = view_target.post_process_write();
+
         {
+            let bind_group = render_context.render_device().create_bind_group(
+                "ssgi_deferred_output_bind_group",
+                &pipelines.deferred_output_bind_group_layout,
+                &BindGroupEntries::sequential((post_process.source,)),
+            );
+
             let mut ssgi_pass =
                 render_context
                     .command_encoder()
@@ -270,6 +278,7 @@ impl ViewNode for SsgiNode {
                 &bind_groups.common_bind_group,
                 &[view_uniform_offset.offset],
             );
+            ssgi_pass.set_bind_group(2, &bind_group, &[]);
             ssgi_pass.dispatch_workgroups(
                 div_ceil(camera_size.x, 16),
                 div_ceil(camera_size.y, 8),
@@ -300,13 +309,13 @@ impl ViewNode for SsgiNode {
         }
 
         {
-            let post_process = view_target.post_process_write();
-
             let bind_group = render_context.render_device().create_bind_group(
                 "post_process_bind_group",
                 &pipelines.post_process_bind_group_layout,
                 &BindGroupEntries::sequential((
-                    &textures.screen_space_ambient_occlusion_texture.default_view,
+                    &textures
+                        .screen_space_global_illumination_texture
+                        .default_view,
                     &pipelines.point_clamp_sampler,
                 )),
             );
@@ -341,7 +350,8 @@ struct SsgiPipelines {
 
     common_bind_group_layout: BindGroupLayout,
     preprocess_depth_bind_group_layout: BindGroupLayout,
-    ssao_bind_group_layout: BindGroupLayout,
+    ssgi_bind_group_layout: BindGroupLayout,
+    deferred_output_bind_group_layout: BindGroupLayout,
     spatial_denoise_bind_group_layout: BindGroupLayout,
     post_process_bind_group_layout: BindGroupLayout,
 
@@ -422,7 +432,7 @@ impl FromWorld for SsgiPipelines {
             ),
         );
 
-        let ssao_bind_group_layout = render_device.create_bind_group_layout(
+        let ssgi_bind_group_layout = render_device.create_bind_group_layout(
             "ssgi_ssgi_bind_group_layout",
             &BindGroupLayoutEntries::sequential(
                 ShaderStages::COMPUTE,
@@ -434,6 +444,14 @@ impl FromWorld for SsgiPipelines {
                     texture_storage_2d(TextureFormat::R32Uint, StorageTextureAccess::WriteOnly),
                     uniform_buffer::<GlobalsUniform>(false),
                 ),
+            ),
+        );
+
+        let deferred_output_bind_group_layout = render_device.create_bind_group_layout(
+            "ssgi_deferred_output_bind_group_layout",
+            &BindGroupLayoutEntries::sequential(
+                ShaderStages::COMPUTE,
+                (texture_2d(TextureSampleType::Float { filterable: false }),),
             ),
         );
 
@@ -513,7 +531,8 @@ impl FromWorld for SsgiPipelines {
 
             common_bind_group_layout,
             preprocess_depth_bind_group_layout,
-            ssao_bind_group_layout,
+            ssgi_bind_group_layout,
+            deferred_output_bind_group_layout,
             spatial_denoise_bind_group_layout,
             post_process_bind_group_layout,
 
@@ -556,20 +575,21 @@ impl SpecializedComputePipeline for SsgiPipelines {
         }
 
         ComputePipelineDescriptor {
-            label: Some("ssao_ssao_pipeline".into()),
+            label: Some("ssgi_ssgi_pipeline".into()),
             layout: vec![
-                self.ssao_bind_group_layout.clone(),
+                self.ssgi_bind_group_layout.clone(),
                 self.common_bind_group_layout.clone(),
+                self.deferred_output_bind_group_layout.clone(),
             ],
             push_constant_ranges: vec![],
             shader: SSGI_SHADER_HANDLE,
             shader_defs,
-            entry_point: "ssao".into(),
+            entry_point: "ssgi".into(),
         }
     }
 }
 
-fn extract_ssao_settings(
+fn extract_ssgi_settings(
     mut commands: Commands,
     cameras: Extract<
         Query<
@@ -579,7 +599,7 @@ fn extract_ssao_settings(
     >,
     msaa: Extract<Res<Msaa>>,
 ) {
-    for (entity, camera, ssao_settings) in &cameras {
+    for (entity, camera, ssgi_settings) in &cameras {
         if **msaa != Msaa::Off {
             error!(
                 "SSGI is being used which requires Msaa::Off, but Msaa is currently set to Msaa::{:?}",
@@ -589,7 +609,7 @@ fn extract_ssao_settings(
         }
 
         if camera.is_active {
-            commands.get_or_spawn(entity).insert(ssao_settings.clone());
+            commands.get_or_spawn(entity).insert(ssgi_settings.clone());
         }
     }
 }
@@ -597,8 +617,8 @@ fn extract_ssao_settings(
 #[derive(Component)]
 pub struct ScreenSpaceGlobalIlluminationTextures {
     preprocessed_depth_texture: CachedTexture,
-    ssao_noisy_texture: CachedTexture, // Pre-spatially denoised texture
-    pub screen_space_ambient_occlusion_texture: CachedTexture, // Spatially denoised texture
+    ssgi_noisy_texture: CachedTexture, // Pre-spatially denoised texture
+    pub screen_space_global_illumination_texture: CachedTexture, // Spatially denoised texture
     depth_differences_texture: CachedTexture,
 }
 
@@ -632,7 +652,7 @@ fn prepare_ssgi_textures(
             },
         );
 
-        let ssao_noisy_texture = texture_cache.get(
+        let ssgi_noisy_texture = texture_cache.get(
             &render_device,
             TextureDescriptor {
                 label: Some("ssgi_noisy_texture"),
@@ -646,7 +666,7 @@ fn prepare_ssgi_textures(
             },
         );
 
-        let ssao_texture = texture_cache.get(
+        let ssgi_texture = texture_cache.get(
             &render_device,
             TextureDescriptor {
                 label: Some("ssgi_texture"),
@@ -678,8 +698,8 @@ fn prepare_ssgi_textures(
             .entity(entity)
             .insert(ScreenSpaceGlobalIlluminationTextures {
                 preprocessed_depth_texture,
-                ssao_noisy_texture,
-                screen_space_ambient_occlusion_texture: ssao_texture,
+                ssgi_noisy_texture,
+                screen_space_global_illumination_texture: ssgi_texture,
                 depth_differences_texture,
             });
     }
@@ -740,7 +760,7 @@ fn prepare_ssgi_bind_groups(
         return;
     };
 
-    for (entity, ssao_textures, prepass_textures) in &views {
+    for (entity, ssgi_textures, prepass_textures) in &views {
         let common_bind_group = render_device.create_bind_group(
             "ssgi_common_bind_group",
             &pipelines.common_bind_group_layout,
@@ -752,11 +772,11 @@ fn prepare_ssgi_bind_groups(
         );
 
         let create_depth_view = |mip_level| {
-            ssao_textures
+            ssgi_textures
                 .preprocessed_depth_texture
                 .texture
                 .create_view(&TextureViewDescriptor {
-                    label: Some("ssao_preprocessed_depth_texture_mip_view"),
+                    label: Some("ssgi_preprocessed_depth_texture_mip_view"),
                     base_mip_level: mip_level,
                     format: Some(TextureFormat::R16Float),
                     dimension: Some(TextureViewDimension::D2),
@@ -766,7 +786,7 @@ fn prepare_ssgi_bind_groups(
         };
 
         let preprocess_depth_bind_group = render_device.create_bind_group(
-            "ssao_preprocess_depth_bind_group",
+            "ssgi_preprocess_depth_bind_group",
             &pipelines.preprocess_depth_bind_group_layout,
             &BindGroupEntries::sequential((
                 prepass_textures.depth_view().unwrap(),
@@ -778,27 +798,27 @@ fn prepare_ssgi_bind_groups(
             )),
         );
 
-        let ssao_bind_group = render_device.create_bind_group(
-            "ssao_ssao_bind_group",
-            &pipelines.ssao_bind_group_layout,
+        let ssgi_bind_group = render_device.create_bind_group(
+            "ssgi_ssgi_bind_group",
+            &pipelines.ssgi_bind_group_layout,
             &BindGroupEntries::sequential((
-                &ssao_textures.preprocessed_depth_texture.default_view,
+                &ssgi_textures.preprocessed_depth_texture.default_view,
                 prepass_textures.normal_view().unwrap(),
                 &pipelines.hilbert_index_lut,
-                &ssao_textures.ssao_noisy_texture.default_view,
-                &ssao_textures.depth_differences_texture.default_view,
+                &ssgi_textures.ssgi_noisy_texture.default_view,
+                &ssgi_textures.depth_differences_texture.default_view,
                 globals_uniforms.clone(),
             )),
         );
 
         let spatial_denoise_bind_group = render_device.create_bind_group(
-            "ssao_spatial_denoise_bind_group",
+            "ssgi_spatial_denoise_bind_group",
             &pipelines.spatial_denoise_bind_group_layout,
             &BindGroupEntries::sequential((
-                &ssao_textures.ssao_noisy_texture.default_view,
-                &ssao_textures.depth_differences_texture.default_view,
-                &ssao_textures
-                    .screen_space_ambient_occlusion_texture
+                &ssgi_textures.ssgi_noisy_texture.default_view,
+                &ssgi_textures.depth_differences_texture.default_view,
+                &ssgi_textures
+                    .screen_space_global_illumination_texture
                     .default_view,
             )),
         );
@@ -806,7 +826,7 @@ fn prepare_ssgi_bind_groups(
         commands.entity(entity).insert(SsgiBindGroups {
             common_bind_group,
             preprocess_depth_bind_group,
-            ssgi_bind_group: ssao_bind_group,
+            ssgi_bind_group: ssgi_bind_group,
             spatial_denoise_bind_group,
         });
     }

@@ -28,6 +28,7 @@
 @group(1) @binding(0) var point_clamp_sampler: sampler;
 @group(1) @binding(1) var linear_point_clamp_sampler: sampler;
 @group(1) @binding(2) var<uniform> view: View;
+@group(2) @binding(0) var deferred_output: texture_2d<f32>;
 
 fn load_noise(pixel_coordinates: vec2<i32>) -> vec2<f32> {
     var index = textureLoad(hilbert_index_lut, pixel_coordinates % 64, 0).r;
@@ -107,30 +108,49 @@ fn updateSectors(
 fn processSample(
     delta_position: vec3<f32>,
     view_vec: vec3<f32>,
+    pixel_normal: vec3<f32>,
+    sample_normal: vec3<f32>,
     sampling_direction: f32,
     n: f32,
     samples_per_slice: f32,
     bitmask: ptr<function, u32>,
-) {
+) -> f32 {
     let delta_position_back_face = delta_position - view_vec * bitcast<f32>(#THICKNESS);
 
+    var front_back_cosines = vec2(
+        dot(normalize(delta_position), view_vec),
+        dot(normalize(delta_position_back_face), view_vec),
+    );
     var front_back_horizon = vec2(
-        fast_acos(dot(normalize(delta_position), view_vec)),
-        fast_acos(dot(normalize(delta_position_back_face), view_vec)),
+        fast_acos(front_back_cosines.x),
+        fast_acos(front_back_cosines.y),
     );
 
     front_back_horizon = saturate(((sampling_direction * -front_back_horizon) - n + HALF_PI) / PI);
     front_back_horizon = select(front_back_horizon.xy, front_back_horizon.yx, sampling_direction >= 0.0);
+    front_back_cosines = select(front_back_cosines.xy, front_back_cosines.yx, sampling_direction >= 0.0);
 
-    *bitmask = updateSectors(front_back_horizon.x, front_back_horizon.y, samples_per_slice, *bitmask);
+    let start_horizon = u32(front_back_horizon.x * samples_per_slice);
+    let angle_horizon_f32 = ceil((front_back_horizon.y - front_back_horizon.x) * samples_per_slice);
+    let angle_horizon = u32(angle_horizon_f32);
+
+    let sample_bitmask = insertBits(0u, 0xFFFFFFFFu, start_horizon, angle_horizon);
+
+    var contrib = f32(countOneBits(sample_bitmask & ~*bitmask)) / max(1.0, angle_horizon_f32);
+    contrib *= max(0.0, dot(pixel_normal, normalize(delta_position)));
+    contrib *= sqrt(max(0.0, dot(sample_normal, -normalize(delta_position))));
+
+    *bitmask |= sample_bitmask;
+
+    return contrib;
 }
 
 @compute
 @workgroup_size(16, 8)
-fn ssao(@builtin(global_invocation_id) global_id: vec3<u32>) {
+fn ssgi(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let slice_count = f32(#SLICE_COUNT);
     let samples_per_slice_side = f32(#SAMPLES_PER_SLICE_SIDE);
-    let effect_radius = 0.5 * 1.457;
+    let effect_radius = 0.5 * 1.457 * 2.0;
     let falloff_range = 0.615 * effect_radius;
     let falloff_from = effect_radius * (1.0 - 0.615);
     let falloff_mul = -1.0 / falloff_range;
@@ -140,7 +160,7 @@ fn ssao(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let uv = (vec2<f32>(pixel_coordinates) + 0.5) / view.viewport.zw;
 
     var pixel_depth = calculate_neighboring_depth_differences(pixel_coordinates);
-    pixel_depth += 0.00001; // Avoid depth precision issues
+    pixel_depth += 0.0001; // Avoid depth precision issues
 
     let pixel_position = reconstruct_view_space_position(pixel_depth, uv);
     let pixel_normal = load_normal_view_space(uv);
@@ -149,10 +169,7 @@ fn ssao(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let noise = load_noise(pixel_coordinates);
     let sample_scale = (-0.5 * effect_radius * view.projection[0][0]) / pixel_position.z;
 
-    var visibility = 0.0;
-#if METHOD == 1
-    var occluded_sample_count = 0u;
-#endif
+    var color = vec3(0.0);
     for (var slice_t = 0.0; slice_t < slice_count; slice_t += 1.0) {
         let slice = slice_t + noise.x;
         let phi = (PI / slice_count) * slice;
@@ -168,14 +185,7 @@ fn ssao(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let cos_norm = saturate(dot(projected_normal, view_vec) / projected_normal_length);
         let n = sign_norm * fast_acos(cos_norm);
 
-#if METHOD == 0
-        let min_cos_horizon_1 = cos(n + HALF_PI);
-        let min_cos_horizon_2 = cos(n - HALF_PI);
-        var cos_horizon_1 = min_cos_horizon_1;
-        var cos_horizon_2 = min_cos_horizon_2;
-#else
         var bitmask = 0u;
-#endif
 
         let sample_mul = vec2<f32>(omega.x, -omega.y) * sample_scale;
         for (var sample_t = 0.0; sample_t < samples_per_slice_side; sample_t += 1.0) {
@@ -191,46 +201,21 @@ fn ssao(@builtin(global_invocation_id) global_id: vec3<u32>) {
             let sample_position_1 = load_and_reconstruct_view_space_position(uv + sample, sample_mip_level);
             let sample_position_2 = load_and_reconstruct_view_space_position(uv - sample, sample_mip_level);
 
+            let sample_normal_1 = load_normal_view_space(uv + sample);
+            let sample_normal_2 = load_normal_view_space(uv - sample);
+
             let sample_difference_1 = sample_position_1 - pixel_position;
             let sample_difference_2 = sample_position_2 - pixel_position;
 
-#if METHOD == 0
-            let sample_distance_1 = length(sample_difference_1);
-            let sample_distance_2 = length(sample_difference_2);
-            var sample_cos_horizon_1 = dot(sample_difference_1 / sample_distance_1, view_vec);
-            var sample_cos_horizon_2 = dot(sample_difference_2 / sample_distance_2, view_vec);
+            let sample_color_1 = textureSampleLevel(deferred_output, point_clamp_sampler, uv + sample, 0.0).xyz;
+            let sample_color_2 = textureSampleLevel(deferred_output, point_clamp_sampler, uv - sample, 0.0).xyz;
 
-            let weight_1 = saturate(sample_distance_1 * falloff_mul + falloff_add);
-            let weight_2 = saturate(sample_distance_2 * falloff_mul + falloff_add);
-            sample_cos_horizon_1 = mix(min_cos_horizon_1, sample_cos_horizon_1, weight_1);
-            sample_cos_horizon_2 = mix(min_cos_horizon_2, sample_cos_horizon_2, weight_2);
-
-            cos_horizon_1 = max(cos_horizon_1, sample_cos_horizon_1);
-            cos_horizon_2 = max(cos_horizon_2, sample_cos_horizon_2);
-#else
-            processSample(sample_difference_1, view_vec, -1.0, n, samples_per_slice_side * 2.0, &bitmask);
-            processSample(sample_difference_2, view_vec, 1.0, n, samples_per_slice_side * 2.0, &bitmask);
-#endif
+            color += sample_color_1 * processSample(sample_difference_1, view_vec, pixel_normal, sample_normal_1, -1.0, n, samples_per_slice_side * 2.0, &bitmask);
+            color += sample_color_2 * processSample(sample_difference_2, view_vec, pixel_normal, sample_normal_2, 1.0, n, samples_per_slice_side * 2.0, &bitmask);
         }
-
-#if METHOD == 0
-        let horizon_1 = fast_acos(cos_horizon_1);
-        let horizon_2 = -fast_acos(cos_horizon_2);
-        let v1 = (cos_norm + 2.0 * horizon_1 * sin(n) - cos(2.0 * horizon_1 - n)) / 4.0;
-        let v2 = (cos_norm + 2.0 * horizon_2 * sin(n) - cos(2.0 * horizon_2 - n)) / 4.0;
-        visibility += projected_normal_length * (v1 + v2);
-#else
-        occluded_sample_count += countOneBits(bitmask);
-#endif
     }
 
-#if METHOD == 0
-    visibility /= slice_count;
-#else
-    visibility = 1.0 - f32(occluded_sample_count) / (slice_count * 2.0 * samples_per_slice_side);
-#endif
+    color += textureSampleLevel(deferred_output, point_clamp_sampler, uv, 0.0).xyz;
 
-    visibility = clamp(visibility, 0.03, 1.0);
-
-    textureStore(ambient_occlusion, pixel_coordinates, vec4<f32>(vec3(visibility), 0.0));
+    textureStore(ambient_occlusion, pixel_coordinates, vec4<f32>(color, 0.0));
 }
