@@ -69,6 +69,20 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
         usage: wgpu::TextureUsages::STORAGE_BINDING,
         view_formats: &[],
     });
+    let mut image = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("image"),
+        size: wgpu::Extent3d {
+            width: size.width,
+            height: size.height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::STORAGE_BINDING,
+        view_formats: &[],
+    });
     let mut size_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("size_buffer"),
         contents: bytemuck::bytes_of(&[size.width, size.height]),
@@ -85,15 +99,25 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
         });
     let render_gbuffer_group_layout = render_gbuffer_pipeline.get_bind_group_layout(0);
 
+    let ssgi_pipeline =
+        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("ssgi_pipeline"),
+            layout: None,
+            module: &shader,
+            entry_point: "ssgi",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        });
+    let ssgi_group_layout = ssgi_pipeline.get_bind_group_layout(0);
+
     let display_bind_group_layout =
         device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("display_bind_group_layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
+                binding: 1,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::StorageTexture {
                     access: wgpu::StorageTextureAccess::ReadWrite,
-                    format: wgpu::TextureFormat::Rgba32Float,
+                    format: wgpu::TextureFormat::Rgba16Float,
                     view_dimension: wgpu::TextureViewDimension::D2,
                 },
                 count: None,
@@ -135,7 +159,7 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
         multiview: None,
     });
 
-    let mut queries = Queries::new(&device, 4);
+    let mut queries = Queries::new(&device, 6);
 
     event_loop.set_control_flow(ControlFlow::Poll);
     event_loop
@@ -158,6 +182,22 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
                             sample_count: 1,
                             dimension: wgpu::TextureDimension::D2,
                             format: wgpu::TextureFormat::Rgba32Float,
+                            usage: wgpu::TextureUsages::STORAGE_BINDING,
+                            view_formats: &[],
+                        });
+
+                        image.destroy();
+                        image = device.create_texture(&wgpu::TextureDescriptor {
+                            label: Some("image"),
+                            size: wgpu::Extent3d {
+                                width: new_size.width,
+                                height: new_size.height,
+                                depth_or_array_layers: 1,
+                            },
+                            mip_level_count: 1,
+                            sample_count: 1,
+                            dimension: wgpu::TextureDimension::D2,
+                            format: wgpu::TextureFormat::Rgba16Float,
                             usage: wgpu::TextureUsages::STORAGE_BINDING,
                             view_formats: &[],
                         });
@@ -198,7 +238,31 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
                                 ),
                             },
                             wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: size_buffer.as_entire_binding(),
+                            },
+                        ],
+                    });
+                
+                let ssgi_bind_group =
+                    device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: None,
+                        layout: &ssgi_group_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &gbuffer.create_view(&wgpu::TextureViewDescriptor::default()),
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
                                 binding: 1,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &image.create_view(&wgpu::TextureViewDescriptor::default()),
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
                                 resource: size_buffer.as_entire_binding(),
                             },
                         ],
@@ -208,9 +272,9 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
                     label: None,
                     layout: &display_bind_group_layout,
                     entries: &[wgpu::BindGroupEntry {
-                        binding: 0,
+                        binding: 1,
                         resource: wgpu::BindingResource::TextureView(
-                            &gbuffer.create_view(&wgpu::TextureViewDescriptor::default()),
+                            &image.create_view(&wgpu::TextureViewDescriptor::default()),
                         ),
                     }],
                 });
@@ -230,6 +294,21 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 
                     cpass.set_pipeline(&render_gbuffer_pipeline);
                     cpass.set_bind_group(0, &render_gbuffer_bind_group, &[]);
+                    cpass.dispatch_workgroups(size.width.div_ceil(16), size.height.div_ceil(8), 1);
+
+                    queries.write_next_timestamp(&mut cpass);
+                }
+
+                {
+                    let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: None,
+                        timestamp_writes: None,
+                    });
+
+                    queries.write_next_timestamp(&mut cpass);
+
+                    cpass.set_pipeline(&ssgi_pipeline);
+                    cpass.set_bind_group(0, &ssgi_bind_group, &[]);
                     cpass.dispatch_workgroups(size.width.div_ceil(16), size.height.div_ceil(8), 1);
 
                     queries.write_next_timestamp(&mut cpass);

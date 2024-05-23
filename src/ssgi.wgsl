@@ -499,6 +499,7 @@ fn vec3ToF32(v: vec3<f32>) -> f32 {
     return bitcast<f32>(intv.x + intv.y * 1024 + intv.z * 1048576);
 }
 
+const EYE = vec3(0.755263, -0.419591, 0.503509);
 const FOV = 0.6;
 const CFOV = tan(FOV);
 const LIGHT_COEFF = 10.0;
@@ -506,9 +507,12 @@ const LIGHT_COEFF_RECIP = 1.0 / LIGHT_COEFF;
 
 @group(0)
 @binding(0)
-var image: texture_storage_2d<rgba32float, read_write>;
+var gbuffer: texture_storage_2d<rgba32float, read_write>;
 @group(0)
 @binding(1)
+var image: texture_storage_2d<rgba16float, read_write>;
+@group(0)
+@binding(2)
 var<uniform> size: vec2<u32>;
 
 @compute
@@ -519,34 +523,144 @@ fn renderGbuffer(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     let size = vec2<f32>(size);
-    let eye = vec3(0.9, -0.5, 0.6);
 
-    let pos = vec3(1.5, 1.0,1.75) - eye * 4.0;
-    let eye_mat = tbn(eye);
+    let pos = vec3(1.5, 1.0,1.75) - EYE * 4.0;
+    let eye_mat = tbn(EYE);
     let dir = normalize(vec3((vec2<f32>(global_id.xy) / size * 2.0 - 1.0) * vec2(1.0, -1.0) * (size.x / size.y * CFOV), 1.0) * eye_mat);
     
     let pixel = trace(pos, dir);
     var result: vec4<f32>;
 
-    if (pixel.color.r > 1.0) {
-            //Emissive
-            result = vec4(vec3ToF32(vec3(pixel.color.r - 1.0, pixel.color.yz) * LIGHT_COEFF_RECIP), -1.0, vec3ToF32(pixel.norm * 0.5 + 0.5), pixel.d);
-        } else if (pixel.color.r > -0.5) {
-            //Geometry
-            let ppos = pos + dir * pixel.d + pixel.norm * 0.0001;
+    if pixel.color.r > 1.0 {
+        //Emissive
+        result = vec4(vec3ToF32(vec3(pixel.color.r - 1.0, pixel.color.yz) * LIGHT_COEFF_RECIP), -1.0, vec3ToF32(pixel.norm * 0.5 + 0.5), pixel.d);
+    } else if (pixel.color.r > -0.5) {
+        //Geometry
+        let ppos = pos + dir * pixel.d + pixel.norm * 0.0001;
 
-            result = vec4(
-                0.0,
-                vec3ToF32(pixel.color),
-                vec3ToF32(pixel.norm * 0.5 + 0.5),
-                pixel.d,
-            );
-        } else {
-            //Sky
-            result = vec4(0.0, -2.0, 0.0, 100000.0);
+        result = vec4(
+            0.0,
+            vec3ToF32(pixel.color),
+            vec3ToF32(pixel.norm * 0.5 + 0.5),
+            pixel.d,
+        );
+    } else {
+        //Sky
+        result = vec4(0.0, -2.0, 0.0, 100000.0);
+    }
+
+    textureStore(gbuffer, global_id.xy, result);
+}
+
+fn f32ToVec3(v: f32) -> vec3<f32> {
+    //Returns vec3 from int
+    let VPInt = bitcast<i32>(v);
+    let VPInt1024 = VPInt % 1024;
+    let VPInt10241024 = ((VPInt - VPInt1024) / 1024) % 1024;
+    return vec3(f32(VPInt1024), f32(VPInt10241024), f32((VPInt - VPInt1024 - VPInt10241024) / 1048576)) * (1.0 / 1024.0);
+}
+
+fn tbnv(norm: vec3<f32>, out: ptr<function, vec3<f32>>) -> vec3<f32> {
+    //Returns the simple tangent space directions
+    if (abs(norm.y) > 0.999) {
+        *out = vec3(1.0, 0.0, 0.0);
+        return vec3(0.0, 0.0, 1.0);
+    } else {
+        *out = normalize(cross(norm, vec3(0.0, 1.0, 0.0)));
+        return normalize(cross(*out, norm));
+    }
+}
+
+fn rand(uv: vec2<f32>) -> f32 {
+    //Returns 1D noise from 2D
+    return fract(sin(uv.x * uv.y) * 403.125 + cos(dot(uv, vec2(13.18273, 51.2134))) * 173.137);
+}
+
+const PI = 3.141592653;
+
+@compute
+@workgroup_size(16, 8)
+fn ssgi(@builtin(global_invocation_id) global_id_vec: vec3<u32>) {
+    let global_id = vec2(global_id_vec.x, size.y - global_id_vec.y);
+
+    if global_id.x >= size.x || global_id.y >= size.y {
+        return;
+    }
+
+    let size = vec2<f32>(size);
+
+    let pos = vec3(1.5, 1.0, 1.75) - EYE * 4.0;
+    var tan: vec3<f32>;
+    let bit = tbnv(EYE, &tan);
+    let eye_mat = tbn(EYE);
+    let dir = normalize(vec3((vec2<f32>(global_id) / size * 2.0 - 1.0) * (size.x / size.y * CFOV), 1.0) * eye_mat);
+
+    let pixel = textureLoad(gbuffer, global_id);
+    var result: vec3<f32>;
+
+    if pixel.y > -0.5 {
+        let ppos = pos + dir * pixel.w;
+        let norm = f32ToVec3(pixel.z) * 2.0 - 1.0;
+
+        //
+        //Screen space horizons
+        //
+
+        result = vec3(0.0);
+
+        let vnorm = vec3(dot(norm, tan), dot(norm, bit), dot(norm, EYE));
+        let vppos = vec3(dot(ppos - pos, tan), dot(ppos - pos, bit), dot(ppos - pos, EYE));
+        let modFC = vec2<f32>(global_id) % 4.0;
+        var randPhi = ((floor(modFC.x) + floor(modFC.y) * 4.0) % 16.0) * 2.0 * PI * (1.0 / 64.0);
+
+        for (var i = 0u; i < 4; i++) {
+            randPhi += PI * 0.5;
+            let ssdir = vec2(cos(randPhi), -sin(randPhi));
+
+            var step_dist = 1.0;
+            let step_coeff = 0.15 + 0.15 * rand(vec2<f32>(global_id) / size * 1.4);
+
+            var bitmask = 0u;
+
+            for (var s = 0u; s < 32; s++) {
+                let suv = vec2<f32>(global_id) + ssdir * step_dist;
+                let current_step = max(1.0, step_dist * step_coeff);
+
+                step_dist += current_step;
+
+                let spixel = textureLoad(gbuffer, vec2<i32>(suv));
+                if spixel.y < -1.5 {
+                    continue;
+                }
+
+                let svppos = normalize(vec3((suv / size * 2.0 - 1.0) * (size.x / size.y * CFOV), 1.0)) * spixel.w;
+                let norm_dot = dot(vnorm, svppos - vppos) - 0.001;
+                let tan_dist = length(svppos - vppos - norm_dot * vnorm);
+
+                let angle1f = atan2(norm_dot, tan_dist);
+                let angle2f = atan2(norm_dot - 0.03 * max(1.0, step_dist * 0.07), tan_dist);
+                let angle1 = max(0.0, ceil(angle1f / (PI * 0.5) * 32.0));
+                let angle2 = max(0.0, floor(angle2f / (PI * 0.5) * 32.0));
+
+                let sbitmask = (u32(pow(2.0, angle1 - angle2)) - 1) << u32(angle2);
+                var snorm_ = f32ToVec3(spixel.z) * 2.0 - 1.0;
+                snorm_ = vec3(dot(snorm_, tan), dot(snorm_, bit), dot(snorm_, EYE));
+
+                result += f32(countOneBits(sbitmask & (~bitmask))) / max(1.0, angle1 - angle2) * f32ToVec3(spixel.x) * LIGHT_COEFF
+                                * (pow(cos(angle2 * (1.0 / 64.0) * PI), 2.0) - pow(cos(angle1 * (1.0 / 64.0) * PI), 2.0))
+                                * sqrt(max(0.0, dot(snorm_, -normalize(svppos - vppos))));
+
+                bitmask |= sbitmask;
+            }
+
+            break;
         }
-
-    textureStore(image, global_id.xy, result);
+    } else {
+        //Sky or emissive
+        result = f32ToVec3(pixel.x) * LIGHT_COEFF;
+    }
+    
+    textureStore(image, global_id.xy, vec4(result, 1.0));
 }
 
 @vertex
