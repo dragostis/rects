@@ -1,4 +1,4 @@
-use bevy::prelude::*;
+use bevy::{core_pipeline::fxaa::Fxaa, prelude::*};
 
 mod plugins;
 
@@ -37,6 +37,7 @@ fn setup(
         },
         CameraController::default(),
         ScreenSpaceGlobalIlluminationBundle::default(),
+        Fxaa::default(),
     ));
 
     // Surface
@@ -74,7 +75,7 @@ fn setup(
         ..default()
     });
 
-    // Area light
+    // Area light door
     commands.spawn(PbrBundle {
         mesh: meshes.add(Plane3d::default().mesh().normal(Dir3::X).size(1.0, 0.5)),
         material: standard_materials.add(StandardMaterial {
@@ -85,7 +86,7 @@ fn setup(
         ..default()
     });
 
-    // Area light
+    // Area light floor
     commands.spawn(PbrBundle {
         mesh: meshes.add(Plane3d::default().mesh().size(0.2, 0.2)),
         material: standard_materials.add(StandardMaterial {
